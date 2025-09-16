@@ -24,14 +24,24 @@ fn constraints_roundtrip_snapshot() {
 
 #[test]
 fn nir_roundtrip_snapshot() {
-    let path = examples_dir().join("nir/minimal.json");
-    let doc = formats::nir::from_reader(File::open(&path).expect("open nir")).expect("load nir");
-    let mut buf = Vec::new();
-    formats::nir::to_writer(&doc, &mut buf).expect("write nir");
-    let doc2 = formats::nir::from_reader(buf.as_slice()).expect("reload nir");
-    assert_eq!(doc, doc2);
-    let value: Value = serde_json::from_slice(&buf).expect("roundtrip value");
-    assert_json_snapshot!("nir_roundtrip", value);
+    let fixtures = ["minimal.json", "full_adder.json", "counter.json"];
+    let base_dir = examples_dir().join("nir");
+
+    for fixture in fixtures {
+        let path = base_dir.join(fixture);
+        let doc =
+            formats::nir::from_reader(File::open(&path).expect("open nir")).expect("load nir");
+        let mut buf = Vec::new();
+        formats::nir::to_writer(&doc, &mut buf).expect("write nir");
+        let doc2 = formats::nir::from_reader(buf.as_slice()).expect("reload nir");
+        assert_eq!(doc, doc2);
+        let value: Value = serde_json::from_slice(&buf).expect("roundtrip value");
+        let snapshot_name = format!(
+            "nir_roundtrip__{}",
+            fixture.strip_suffix(".json").unwrap_or(fixture)
+        );
+        assert_json_snapshot!(snapshot_name, value);
+    }
 }
 
 #[test]

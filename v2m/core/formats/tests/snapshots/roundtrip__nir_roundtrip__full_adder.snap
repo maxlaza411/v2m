@@ -1,0 +1,173 @@
+---
+source: core/formats/tests/roundtrip.rs
+expression: value
+---
+{
+  "design": "full_adder",
+  "modules": {
+    "FullAdder": {
+      "nets": {
+        "a": {
+          "bits": 1
+        },
+        "b": {
+          "bits": 1
+        },
+        "carry_ab": {
+          "bits": 1
+        },
+        "carry_cin": {
+          "bits": 1
+        },
+        "cin": {
+          "bits": 1
+        },
+        "cout": {
+          "bits": 1
+        },
+        "sum": {
+          "bits": 1
+        },
+        "sum_ab": {
+          "bits": 1
+        }
+      },
+      "nodes": {
+        "and_ab": {
+          "op": "AND",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "a"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "b"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "carry_ab"
+            }
+          },
+          "uid": "and_ab",
+          "width": 1
+        },
+        "and_cin": {
+          "op": "AND",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "sum_ab"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "cin"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "carry_cin"
+            }
+          },
+          "uid": "and_cin",
+          "width": 1
+        },
+        "or_carry": {
+          "op": "OR",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "carry_ab"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "carry_cin"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "cout"
+            }
+          },
+          "uid": "or_carry",
+          "width": 1
+        },
+        "xor_ab": {
+          "op": "XOR",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "a"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "b"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "sum_ab"
+            }
+          },
+          "uid": "xor_ab",
+          "width": 1
+        },
+        "xor_sum": {
+          "op": "XOR",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "sum_ab"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "cin"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "sum"
+            }
+          },
+          "uid": "xor_sum",
+          "width": 1
+        }
+      },
+      "ports": {
+        "a": {
+          "bits": 1,
+          "dir": "input"
+        },
+        "b": {
+          "bits": 1,
+          "dir": "input"
+        },
+        "cin": {
+          "bits": 1,
+          "dir": "input"
+        },
+        "cout": {
+          "bits": 1,
+          "dir": "output"
+        },
+        "sum": {
+          "bits": 1,
+          "dir": "output"
+        }
+      }
+    }
+  },
+  "top": "FullAdder",
+  "v": "nir-1.1"
+}

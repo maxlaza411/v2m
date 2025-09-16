@@ -1,0 +1,168 @@
+---
+source: core/formats/tests/roundtrip.rs
+expression: value
+---
+{
+  "attrs": {
+    "description": "4-bit counter with enable and synchronous reset"
+  },
+  "design": "counter",
+  "modules": {
+    "Counter": {
+      "nets": {
+        "clk": {
+          "bits": 1
+        },
+        "en": {
+          "bits": 1
+        },
+        "enabled_next": {
+          "bits": 4
+        },
+        "incremented": {
+          "bits": 4
+        },
+        "next": {
+          "bits": 4
+        },
+        "reset": {
+          "bits": 1
+        },
+        "value": {
+          "bits": 4
+        }
+      },
+      "nodes": {
+        "add_inc": {
+          "op": "ADD",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "value"
+            },
+            "B": {
+              "const": "0001",
+              "width": 4
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "incremented"
+            }
+          },
+          "uid": "add_inc",
+          "width": 4
+        },
+        "mux_enable": {
+          "op": "MUX",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "value"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "incremented"
+            },
+            "S": {
+              "concat": [
+                {
+                  "lsb": 0,
+                  "msb": 0,
+                  "net": "en"
+                }
+              ]
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "enabled_next"
+            }
+          },
+          "uid": "mux_enable",
+          "width": 4
+        },
+        "mux_reset": {
+          "op": "MUX",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "enabled_next"
+            },
+            "B": {
+              "const": "0000",
+              "width": 4
+            },
+            "S": {
+              "concat": [
+                {
+                  "lsb": 0,
+                  "msb": 0,
+                  "net": "reset"
+                }
+              ]
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "next"
+            }
+          },
+          "uid": "mux_reset",
+          "width": 4
+        },
+        "state_reg": {
+          "op": "DFF",
+          "pin_map": {
+            "CLK": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "clk"
+            },
+            "D": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "next"
+            },
+            "Q": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "value"
+            },
+            "RST": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "reset"
+            }
+          },
+          "uid": "state_reg",
+          "width": 4
+        }
+      },
+      "ports": {
+        "clk": {
+          "bits": 1,
+          "dir": "input"
+        },
+        "en": {
+          "bits": 1,
+          "dir": "input"
+        },
+        "reset": {
+          "bits": 1,
+          "dir": "input"
+        },
+        "value": {
+          "bits": 4,
+          "dir": "output"
+        }
+      }
+    }
+  },
+  "top": "Counter",
+  "v": "nir-1.1"
+}
