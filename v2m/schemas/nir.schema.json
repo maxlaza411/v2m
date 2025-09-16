@@ -1,0 +1,116 @@
+{
+  "$id": "https://v2m.dev/schemas/nir#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "V2M NIR",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v","design","top","modules"],
+  "properties": {
+    "v": { "type": "string", "const": "nir-1.1" },
+    "design": { "type": "string" },
+    "top": { "type": "string" },
+    "attrs": { "type": "object", "additionalProperties": { "type": ["string","number","boolean"] } },
+    "modules": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/module" }
+    },
+    "generator": { "type": "string" },
+    "cmdline": { "type": "string" },
+    "source_digest_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  },
+  "$defs": {
+    "bitwidth": { "type": "integer", "minimum": 1 },
+    "portdir": { "enum": ["input","output","inout"] },
+
+    "BitRef": {
+      "description": "Reference to bits of a net or a constant",
+      "oneOf": [
+        { "type": "object", "additionalProperties": false,
+          "required": ["net","lsb","msb"],
+          "properties": {
+            "net": { "type": "string" },
+            "lsb": { "type": "integer", "minimum": 0 },
+            "msb": { "type": "integer", "minimum": 0 }
+          }
+        },
+        { "type": "object", "additionalProperties": false,
+          "required": ["const","width"],
+          "properties": {
+            "const": { "type": "string", "pattern": "^(?:\\d+|0b[01_]+|0x[0-9A-Fa-f_]+)$" },
+            "width": { "$ref": "#/$defs/bitwidth" }
+          }
+        },
+        { "type": "object", "additionalProperties": false,
+          "required": ["concat"],
+          "properties": {
+            "concat": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/BitRef" }
+            }
+          }
+        }
+      ]
+    },
+
+    "port": {
+      "type": "object", "additionalProperties": false,
+      "required": ["dir","bits"],
+      "properties": {
+        "dir": { "$ref": "#/$defs/portdir" },
+        "bits": { "$ref": "#/$defs/bitwidth" },
+        "attrs": { "type": "object" }
+      }
+    },
+
+    "net": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bits"],
+      "properties": {
+        "bits": { "$ref": "#/$defs/bitwidth" },
+        "attrs": { "type": "object" }
+      }
+    },
+
+    "node": {
+      "type": "object", "additionalProperties": false,
+      "required": ["uid","op","pin_map","width"],
+      "properties": {
+        "uid": { "type": "string" },
+        "op": { "enum": ["AND","OR","XOR","XNOR","NOT","MUX","ADD","SUB","SLICE","CAT","CONST","DFF","LATCH"] },
+        "width": { "$ref": "#/$defs/bitwidth" },
+        "params": { "type": "object" },
+        "pin_map": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/BitRef" }
+        },
+        "attrs": { "type": "object" }
+      },
+      "allOf": [
+        { "if": { "properties": { "op": { "const": "MUX" } } },
+          "then": { "properties": { "pin_map": { "required": ["A","B","S","Y"] } } } },
+        { "if": { "properties": { "op": { "const": "DFF" } } },
+          "then": { "properties": { "pin_map": { "required": ["D","Q","CLK"], "properties": { "RST": { "$ref": "#/$defs/BitRef" } } } } } }
+      ]
+    },
+
+    "module": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ports","nets","nodes"],
+      "properties": {
+        "ports": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/port" }
+        },
+        "nets": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/net" }
+        },
+        "nodes": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/node" }
+        }
+      }
+    }
+  }
+}

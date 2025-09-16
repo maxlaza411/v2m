@@ -1,0 +1,51 @@
+{
+  "$id": "https://v2m.dev/schemas/pir#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "V2M PIR",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v","top","placements","routes"],
+  "properties": {
+    "v": { "type": "string", "const": "pir-1.1" },
+    "top": { "type": "string" },
+    "placements": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["uid","inst","cell","x","y","z","rot"],
+        "properties": {
+          "uid":{"type":"string"},
+          "inst":{"type":"string"},
+          "cell":{"type":"string"},
+          "x":{"type":"integer"},"y":{"type":"integer"},"z":{"type":"integer"},
+          "rot":{"enum":["R0","R90","R180","R270","MX","MY","MZ"]}
+        }
+      }
+    },
+    "routes": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["uid","net","segments"],
+        "properties": {
+          "uid":{"type":"string"},
+          "net":{"type":"string"},
+          "segments":{"type":"array","items":{
+            "type":"object","additionalProperties": false,
+            "required":["kind","points"],
+            "properties":{
+              "kind":{"enum":["DUST","REPEATER","COMPARATOR","TORCH_TOWER","ELEVATOR","BRIDGE"]},
+              "points":{"type":"array","minItems":2,"items":{"type":"object","additionalProperties": false,"required":["x","y","z"],"properties":{
+                "x":{"type":"integer"},"y":{"type":"integer"},"z":{"type":"integer"}
+              }}},
+              "attrs":{"type":"object"},
+              "turns":{"type":"integer","minimum":0},
+              "vias":{"type":"integer","minimum":0}
+            }
+          }}
+        }
+      }
+    }
+  }
+}
