@@ -1,0 +1,1087 @@
+---
+source: core/nir/tests/nir_golden.rs
+assertion_line: 25
+---
+{
+  "design": "alu4",
+  "top": "alu4",
+  "modules": {
+    "alu4": {
+      "inputs": {
+        "a": [
+          {
+            "node": 0
+          },
+          {
+            "node": 1
+          },
+          {
+            "node": 2
+          },
+          {
+            "node": 3
+          }
+        ],
+        "b": [
+          {
+            "node": 4
+          },
+          {
+            "node": 5
+          },
+          {
+            "node": 6
+          },
+          {
+            "node": 7
+          }
+        ],
+        "op": [
+          {
+            "node": 8
+          },
+          {
+            "node": 9
+          }
+        ]
+      },
+      "outputs": {
+        "y": [
+          {
+            "node": 59
+          },
+          {
+            "node": 62
+          },
+          {
+            "node": 65
+          },
+          {
+            "node": 68
+          }
+        ]
+      },
+      "states": [],
+      "nodes": [
+        {
+          "width": 1,
+          "id": 0,
+          "kind": {
+            "kind": "input"
+          }
+        },
+        {
+          "width": 1,
+          "id": 1,
+          "kind": {
+            "kind": "input"
+          }
+        },
+        {
+          "width": 1,
+          "id": 2,
+          "kind": {
+            "kind": "input"
+          }
+        },
+        {
+          "width": 1,
+          "id": 3,
+          "kind": {
+            "kind": "input"
+          }
+        },
+        {
+          "width": 1,
+          "id": 4,
+          "kind": {
+            "kind": "input"
+          }
+        },
+        {
+          "width": 1,
+          "id": 5,
+          "kind": {
+            "kind": "input"
+          }
+        },
+        {
+          "width": 1,
+          "id": 6,
+          "kind": {
+            "kind": "input"
+          }
+        },
+        {
+          "width": 1,
+          "id": 7,
+          "kind": {
+            "kind": "input"
+          }
+        },
+        {
+          "width": 1,
+          "id": 8,
+          "kind": {
+            "kind": "input"
+          }
+        },
+        {
+          "width": 1,
+          "id": 9,
+          "kind": {
+            "kind": "input"
+          }
+        },
+        {
+          "width": 1,
+          "id": 10,
+          "kind": {
+            "kind": "const",
+            "bits": "0"
+          }
+        },
+        {
+          "width": 1,
+          "id": 11,
+          "kind": {
+            "kind": "op",
+            "op": "XOR",
+            "inputs": [
+              {
+                "node": 0
+              },
+              {
+                "node": 4
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 12,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 0
+              },
+              {
+                "node": 4
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 13,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 10
+              },
+              {
+                "node": 12
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 14,
+          "kind": {
+            "kind": "op",
+            "op": "XOR",
+            "inputs": [
+              {
+                "node": 1
+              },
+              {
+                "node": 5
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 15,
+          "kind": {
+            "kind": "op",
+            "op": "XOR",
+            "inputs": [
+              {
+                "node": 13
+              },
+              {
+                "node": 14
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 16,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 1
+              },
+              {
+                "node": 5
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 17,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 13
+              },
+              {
+                "node": 14
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 18,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 16
+              },
+              {
+                "node": 17
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 19,
+          "kind": {
+            "kind": "op",
+            "op": "XOR",
+            "inputs": [
+              {
+                "node": 2
+              },
+              {
+                "node": 6
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 20,
+          "kind": {
+            "kind": "op",
+            "op": "XOR",
+            "inputs": [
+              {
+                "node": 18
+              },
+              {
+                "node": 19
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 21,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 2
+              },
+              {
+                "node": 6
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 22,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 18
+              },
+              {
+                "node": 19
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 23,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 21
+              },
+              {
+                "node": 22
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 24,
+          "kind": {
+            "kind": "op",
+            "op": "XOR",
+            "inputs": [
+              {
+                "node": 3
+              },
+              {
+                "node": 7
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 25,
+          "kind": {
+            "kind": "op",
+            "op": "XOR",
+            "inputs": [
+              {
+                "node": 23
+              },
+              {
+                "node": 24
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 26,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 3
+              },
+              {
+                "node": 7
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 27,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 23
+              },
+              {
+                "node": 24
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 28,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 26
+              },
+              {
+                "node": 27
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 29,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8,
+                "inverted": true
+              },
+              {
+                "node": 11
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 30,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8
+              },
+              {
+                "node": 12
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 31,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 29
+              },
+              {
+                "node": 30
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 32,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8,
+                "inverted": true
+              },
+              {
+                "node": 15
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 33,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8
+              },
+              {
+                "node": 16
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 34,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 32
+              },
+              {
+                "node": 33
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 35,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8,
+                "inverted": true
+              },
+              {
+                "node": 20
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 36,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8
+              },
+              {
+                "node": 21
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 37,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 35
+              },
+              {
+                "node": 36
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 38,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8,
+                "inverted": true
+              },
+              {
+                "node": 25
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 39,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8
+              },
+              {
+                "node": 26
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 40,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 38
+              },
+              {
+                "node": 39
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 41,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 0
+              },
+              {
+                "node": 4
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 42,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 1
+              },
+              {
+                "node": 5
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 43,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 2
+              },
+              {
+                "node": 6
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 44,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 3
+              },
+              {
+                "node": 7
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 45,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8,
+                "inverted": true
+              },
+              {
+                "node": 41
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 46,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8
+              },
+              {
+                "node": 11
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 47,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 45
+              },
+              {
+                "node": 46
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 48,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8,
+                "inverted": true
+              },
+              {
+                "node": 42
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 49,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8
+              },
+              {
+                "node": 14
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 50,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 48
+              },
+              {
+                "node": 49
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 51,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8,
+                "inverted": true
+              },
+              {
+                "node": 43
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 52,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8
+              },
+              {
+                "node": 19
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 53,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 51
+              },
+              {
+                "node": 52
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 54,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8,
+                "inverted": true
+              },
+              {
+                "node": 44
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 55,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8
+              },
+              {
+                "node": 24
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 56,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 54
+              },
+              {
+                "node": 55
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 57,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 9,
+                "inverted": true
+              },
+              {
+                "node": 31
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 58,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 9
+              },
+              {
+                "node": 47
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 59,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 57
+              },
+              {
+                "node": 58
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 60,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 9,
+                "inverted": true
+              },
+              {
+                "node": 34
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 61,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 9
+              },
+              {
+                "node": 50
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 62,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 60
+              },
+              {
+                "node": 61
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 63,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 9,
+                "inverted": true
+              },
+              {
+                "node": 37
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 64,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 9
+              },
+              {
+                "node": 53
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 65,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 63
+              },
+              {
+                "node": 64
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 66,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 9,
+                "inverted": true
+              },
+              {
+                "node": 40
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 67,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 9
+              },
+              {
+                "node": 56
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 68,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 66
+              },
+              {
+                "node": 67
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

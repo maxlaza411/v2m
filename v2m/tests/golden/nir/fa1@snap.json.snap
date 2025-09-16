@@ -1,0 +1,145 @@
+---
+source: core/nir/tests/nir_golden.rs
+assertion_line: 25
+---
+{
+  "design": "fa1",
+  "top": "fa1",
+  "modules": {
+    "fa1": {
+      "inputs": {
+        "a": [
+          {
+            "node": 0
+          }
+        ],
+        "b": [
+          {
+            "node": 1
+          }
+        ],
+        "cin": [
+          {
+            "node": 2
+          }
+        ]
+      },
+      "outputs": {
+        "cout": [
+          {
+            "node": 6
+          }
+        ],
+        "sum": [
+          {
+            "node": 7
+          }
+        ]
+      },
+      "states": [],
+      "nodes": [
+        {
+          "width": 1,
+          "id": 0,
+          "kind": {
+            "kind": "input"
+          }
+        },
+        {
+          "width": 1,
+          "id": 1,
+          "kind": {
+            "kind": "input"
+          }
+        },
+        {
+          "width": 1,
+          "id": 2,
+          "kind": {
+            "kind": "input"
+          }
+        },
+        {
+          "width": 1,
+          "id": 3,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 0
+              },
+              {
+                "node": 1
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 4,
+          "kind": {
+            "kind": "op",
+            "op": "XOR",
+            "inputs": [
+              {
+                "node": 0
+              },
+              {
+                "node": 1
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 5,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 2
+              },
+              {
+                "node": 4
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 6,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 3
+              },
+              {
+                "node": 5
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 7,
+          "kind": {
+            "kind": "op",
+            "op": "XOR",
+            "inputs": [
+              {
+                "node": 2
+              },
+              {
+                "node": 4
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
