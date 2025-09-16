@@ -1193,26 +1193,17 @@ mod tests {
         for &num_vectors in &batch_sizes {
             let mut batch_eval =
                 Evaluator::new(&nir, num_vectors, SimOptions::default()).expect("batch eval");
-            let output_names: Vec<String> =
-                batch_eval.output_ports.keys().cloned().collect();
+            let output_names: Vec<String> = batch_eval.output_ports.keys().cloned().collect();
 
             let mut input_vectors: HashMap<String, Vec<BigUint>> = HashMap::new();
-            input_vectors.insert(
-                "a".to_string(),
-                random_biguints(8, num_vectors, &mut rng),
-            );
-            input_vectors.insert(
-                "b".to_string(),
-                random_biguints(8, num_vectors, &mut rng),
-            );
+            input_vectors.insert("a".to_string(), random_biguints(8, num_vectors, &mut rng));
+            input_vectors.insert("b".to_string(), random_biguints(8, num_vectors, &mut rng));
 
             let packed_inputs = batch_eval
                 .pack_inputs_from_biguints(&input_vectors)
                 .expect("pack batch inputs");
             let reset = PackedBitMask::new(num_vectors);
-            let packed_outputs = batch_eval
-                .tick(&packed_inputs, &reset)
-                .expect("batch tick");
+            let packed_outputs = batch_eval.tick(&packed_inputs, &reset).expect("batch tick");
             let batch_outputs = batch_eval
                 .unpack_outputs_to_biguints(&packed_outputs)
                 .expect("unpack batch outputs");
@@ -1253,7 +1244,9 @@ mod tests {
 
             assert_eq!(batch_outputs, expected, "num_vectors = {}", num_vectors);
         }
+    }
 
+    #[test]
     fn comb_eval_mux_selects_inputs() {
         let data_width = 5u32;
 
@@ -1907,10 +1900,9 @@ impl<'nir> Evaluator<'nir> {
 
             for word_idx in 0..words_per_lane {
                 let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
-                let value =
-                    (self.nets.storage[input_a_base + word_idx]
-                        & self.nets.storage[input_b_base + word_idx])
-                        & mask;
+                let value = (self.nets.storage[input_a_base + word_idx]
+                    & self.nets.storage[input_b_base + word_idx])
+                    & mask;
                 self.nets.storage[output_base + word_idx] = value;
             }
         }
