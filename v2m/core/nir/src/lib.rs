@@ -4,9 +4,14 @@ use std::fmt;
 use std::io::Write;
 
 mod lint;
+mod normalize;
 mod strash;
 
 pub use lint::{lint_module, lint_nir, Driver, LintError};
+pub use normalize::{
+    normalize_module, normalize_nir, NormalizeError, NormalizedLiteral, NormalizedModule,
+    NormalizedNir, NormalizedNode, NormalizedNodeKind, StateBitSnapshot, StateSnapshot,
+};
 pub use strash::{Literal, ParamMap, StrashKind, StrashNode, StrashNodeId, StructuralHasher};
 
 use v2m_formats::nir::{Module, NodeOp};

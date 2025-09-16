@@ -803,6 +803,8 @@ dependencies = [
 name = "v2m-nir"
 version = "0.1.0"
 dependencies = [
+ "insta",
+ "serde",
  "serde_json",
  "thiserror",
  "v2m-formats",
