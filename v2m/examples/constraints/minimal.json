@@ -1,0 +1,14 @@
+{
+  "v": "constraints-1.1",
+  "timing": {
+    "clock_name": "clk",
+    "clock_period_ticks": 2.0,
+    "uncertainty_ticks": 0.1
+  },
+  "retime": true,
+  "routing": {
+    "track_pitch": 4,
+    "via_cost": 1.5
+  },
+  "backend": "redstone"
+}

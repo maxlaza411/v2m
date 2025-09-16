@@ -1,0 +1,81 @@
+---
+source: core/formats/tests/roundtrip.rs
+assertion_line: 48
+expression: value
+---
+{
+  "lib": "stdcells",
+  "modules": {
+    "Example": {
+      "instances": {
+        "inst0": {
+          "cell": "AND2",
+          "connections": {
+            "A": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "a"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "b"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "n0"
+            }
+          },
+          "uid": "inst0"
+        },
+        "inst1": {
+          "cell": "BUF",
+          "connections": {
+            "A": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "n0"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "y"
+            }
+          },
+          "uid": "inst1"
+        }
+      },
+      "nets": {
+        "a": {
+          "bits": 1
+        },
+        "b": {
+          "bits": 1
+        },
+        "n0": {
+          "bits": 1
+        },
+        "y": {
+          "bits": 1
+        }
+      },
+      "ports": {
+        "a": {
+          "bits": 1,
+          "dir": "input"
+        },
+        "b": {
+          "bits": 1,
+          "dir": "input"
+        },
+        "y": {
+          "bits": 1,
+          "dir": "output"
+        }
+      }
+    }
+  },
+  "top": "Example",
+  "v": "tir-1.1"
+}

@@ -1,0 +1,19 @@
+---
+source: core/formats/tests/roundtrip.rs
+assertion_line: 22
+expression: value
+---
+{
+  "backend": "redstone",
+  "retime": true,
+  "routing": {
+    "track_pitch": 4,
+    "via_cost": 1.5
+  },
+  "timing": {
+    "clock_name": "clk",
+    "clock_period_ticks": 2.0,
+    "uncertainty_ticks": 0.1
+  },
+  "v": "constraints-1.1"
+}

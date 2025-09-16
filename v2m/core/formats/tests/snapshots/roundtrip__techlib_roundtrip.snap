@@ -1,0 +1,104 @@
+---
+source: core/formats/tests/roundtrip.rs
+assertion_line: 74
+expression: value
+---
+{
+  "cells": [
+    {
+      "delays": [
+        {
+          "from": "A",
+          "ticks": 1.0,
+          "to": "Y"
+        },
+        {
+          "from": "B",
+          "ticks": 1.0,
+          "to": "Y"
+        }
+      ],
+      "footprint": {
+        "connectors": [
+          {
+            "facing": "east",
+            "pin": "A",
+            "x": -1,
+            "y": 0,
+            "z": 0
+          },
+          {
+            "facing": "south",
+            "pin": "B",
+            "x": 0,
+            "y": 0,
+            "z": -1
+          },
+          {
+            "facing": "west",
+            "pin": "Y",
+            "x": 1,
+            "y": 0,
+            "z": 0
+          }
+        ],
+        "size": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "voxels": [
+          {
+            "block": "minecraft:stone",
+            "state": {},
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        ]
+      },
+      "kind": "COMB",
+      "name": "AND2",
+      "pins": [
+        {
+          "bitwidth": 1,
+          "dir": "in",
+          "name": "A"
+        },
+        {
+          "bitwidth": 1,
+          "dir": "in",
+          "name": "B"
+        },
+        {
+          "bitwidth": 1,
+          "dir": "out",
+          "name": "Y"
+        }
+      ],
+      "rotations": [
+        "R0",
+        "R180"
+      ]
+    }
+  ],
+  "minecraft": {
+    "coords": "x-east_y-up_z-south",
+    "edition": "java",
+    "orientations": [
+      "north",
+      "south",
+      "east",
+      "west",
+      "up",
+      "down"
+    ],
+    "version": "1.20"
+  },
+  "name": "stdcells",
+  "physics": {
+    "power_levels": 15,
+    "tick": 0.05
+  },
+  "v": "techlib-1.1"
+}

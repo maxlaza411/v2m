@@ -1,0 +1,45 @@
+---
+source: core/formats/tests/roundtrip.rs
+assertion_line: 61
+expression: value
+---
+{
+  "placements": [
+    {
+      "cell": "AND2",
+      "inst": "inst0",
+      "rot": "R0",
+      "uid": "inst0",
+      "x": 0,
+      "y": 0,
+      "z": 0
+    }
+  ],
+  "routes": [
+    {
+      "net": "n0",
+      "segments": [
+        {
+          "kind": "DUST",
+          "points": [
+            {
+              "x": 0,
+              "y": 0,
+              "z": 0
+            },
+            {
+              "x": 1,
+              "y": 0,
+              "z": 0
+            }
+          ],
+          "turns": 0,
+          "vias": 0
+        }
+      ],
+      "uid": "route0"
+    }
+  ],
+  "top": "Example",
+  "v": "pir-1.1"
+}

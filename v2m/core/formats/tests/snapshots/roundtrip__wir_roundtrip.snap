@@ -1,0 +1,35 @@
+---
+source: core/formats/tests/roundtrip.rs
+assertion_line: 87
+expression: value
+---
+{
+  "ops": [
+    {
+      "block": "minecraft:redstone_wire",
+      "op": "setblock",
+      "state": {
+        "power": 15
+      },
+      "x": 0,
+      "y": 64,
+      "z": 0
+    },
+    {
+      "op": "placestructure",
+      "rot": "R0",
+      "structure": "and2",
+      "x": 1,
+      "y": 64,
+      "z": 0
+    },
+    {
+      "content": "say hello",
+      "op": "writefile",
+      "path": "data/function.mcfunction",
+      "stage": "load"
+    }
+  ],
+  "target": "redstone-world",
+  "v": "wir-1.1"
+}

@@ -1,0 +1,28 @@
+{
+  "v": "wir-1.1",
+  "target": "redstone-world",
+  "ops": [
+    {
+      "op": "setblock",
+      "x": 0,
+      "y": 64,
+      "z": 0,
+      "block": "minecraft:redstone_wire",
+      "state": { "power": 15 }
+    },
+    {
+      "op": "placestructure",
+      "structure": "and2",
+      "x": 1,
+      "y": 64,
+      "z": 0,
+      "rot": "R0"
+    },
+    {
+      "op": "writefile",
+      "path": "data/function.mcfunction",
+      "content": "say hello",
+      "stage": "load"
+    }
+  ]
+}
