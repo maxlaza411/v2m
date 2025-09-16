@@ -1,0 +1,777 @@
+use std::collections::{BTreeMap, HashMap};
+
+use serde::Serialize;
+
+use crate::{
+    BuildError, EvalOrderError, Literal, ModuleGraph, NodeId, ParamMap, StrashKind,
+    StructuralHasher,
+};
+use v2m_formats::nir::{Module, Nir, Node, NodeOp, PortDirection};
+use v2m_formats::{resolve_bitref, BitRef, ResolvedBit, ResolvedNetBit};
+
+#[derive(Debug, thiserror::Error)]
+pub enum NormalizeError {
+    #[error("failed to build module graph: {0}")]
+    BuildGraph(#[from] BuildError),
+    #[error("failed to compute evaluation order: {0}")]
+    EvalOrder(#[from] EvalOrderError),
+    #[error("node `{node}` pin `{pin}`: {source}")]
+    PinResolve {
+        node: String,
+        pin: String,
+        #[source]
+        source: v2m_formats::Error,
+    },
+    #[error("net `{net}` is not defined in module")]
+    UnknownNet { net: String },
+    #[error("net `{net}` bit {bit} has not been assigned a driver")]
+    UnresolvedNetBit { net: String, bit: u32 },
+    #[error("net `{net}` bit {bit} already has a driver")]
+    DuplicateNetBit { net: String, bit: u32 },
+    #[error("node `{node}` is missing pin `{pin}`")]
+    MissingPin { node: String, pin: String },
+    #[error("node `{node}` output is not connected to any net")]
+    OutputWithoutNet { node: String },
+    #[error("node `{node}` output width mismatch: expected {expected} bits, got {actual}")]
+    OutputWidthMismatch {
+        node: String,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("node `{node}` output cannot drive a constant value")]
+    OutputToConstant { node: String },
+    #[error("node `{node}` has unsupported operation `{op:?}`")]
+    UnsupportedOp { node: String, op: NodeOp },
+    #[error("node `{node}` mux select width {width} is not supported")]
+    UnsupportedMuxWidth { node: String, width: usize },
+    #[error(
+        "node `{node}` operand width mismatch for `{op:?}`: left is {lhs} bits, right is {rhs} bits"
+    )]
+    WidthMismatch {
+        node: String,
+        op: NodeOp,
+        lhs: usize,
+        rhs: usize,
+    },
+    #[error(
+        "sequential element `{node}` width mismatch between Q ({expected} bits) and D ({actual} bits)"
+    )]
+    StateWidthMismatch {
+        node: String,
+        expected: usize,
+        actual: usize,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub struct NormalizedNir {
+    pub design: String,
+    pub top: String,
+    pub modules: BTreeMap<String, NormalizedModule>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NormalizedModule {
+    pub inputs: BTreeMap<String, Vec<NormalizedLiteral>>,
+    pub outputs: BTreeMap<String, Vec<NormalizedLiteral>>,
+    pub states: Vec<StateSnapshot>,
+    pub nodes: Vec<NormalizedNode>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct NormalizedLiteral {
+    pub node: usize,
+    #[serde(default, skip_serializing_if = "skip_false")]
+    pub inverted: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NormalizedNode {
+    pub width: u32,
+    pub id: usize,
+    pub kind: NormalizedNodeKind,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NormalizedNodeKind {
+    Input,
+    Const {
+        bits: String,
+    },
+    Op {
+        op: NodeOp,
+        inputs: Vec<NormalizedLiteral>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        params: Option<ParamMap>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub struct StateSnapshot {
+    pub name: String,
+    pub bits: Vec<StateBitSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StateBitSnapshot {
+    pub net: String,
+    pub bit: u32,
+    pub q: NormalizedLiteral,
+    pub d: NormalizedLiteral,
+}
+
+pub fn normalize_nir(nir: &Nir) -> Result<NormalizedNir, NormalizeError> {
+    let mut modules = BTreeMap::new();
+    for (name, module) in &nir.modules {
+        let normalized = normalize_module(module)?;
+        modules.insert(name.clone(), normalized);
+    }
+
+    Ok(NormalizedNir {
+        design: nir.design.clone(),
+        top: nir.top.clone(),
+        modules,
+    })
+}
+
+pub fn normalize_module(module: &Module) -> Result<NormalizedModule, NormalizeError> {
+    Normalizer::new(module)?.run()
+}
+
+struct NetState {
+    bits: Vec<Option<Literal>>,
+}
+
+impl NetState {
+    fn new(width: u32) -> Self {
+        Self {
+            bits: vec![None; width as usize],
+        }
+    }
+}
+
+struct RegisterInfo {
+    name: String,
+    q_refs: Vec<ResolvedNetBit>,
+    q_literals: Vec<Literal>,
+    d_pin: BitRef,
+    d_literals: Vec<Literal>,
+}
+
+struct Normalizer<'a> {
+    module: &'a Module,
+    nodes: Vec<(&'a String, &'a Node)>,
+    order: Vec<NodeId>,
+    hasher: StructuralHasher,
+    nets: HashMap<String, NetState>,
+    inputs: BTreeMap<String, Vec<Literal>>,
+    registers: Vec<RegisterInfo>,
+}
+
+impl<'a> Normalizer<'a> {
+    fn new(module: &'a Module) -> Result<Self, NormalizeError> {
+        let graph = ModuleGraph::from_module(module)?;
+        let order = graph.combinational_topological_order()?;
+
+        let mut nets = HashMap::with_capacity(module.nets.len());
+        for (name, net) in &module.nets {
+            nets.insert(name.clone(), NetState::new(net.bits));
+        }
+
+        let nodes = module.nodes.iter().collect();
+
+        Ok(Self {
+            module,
+            nodes,
+            order,
+            hasher: StructuralHasher::new(),
+            nets,
+            inputs: BTreeMap::new(),
+            registers: Vec::new(),
+        })
+    }
+
+    fn run(mut self) -> Result<NormalizedModule, NormalizeError> {
+        self.initialize_primary_inputs()?;
+        self.initialize_registers()?;
+        self.evaluate_combinational_nodes()?;
+        self.resolve_register_inputs()?;
+        let outputs = self.collect_outputs()?;
+        self.ensure_all_bits_resolved()?;
+
+        let inputs = self
+            .inputs
+            .iter()
+            .map(|(name, bits)| {
+                (
+                    name.clone(),
+                    bits.iter().copied().map(NormalizedLiteral::from).collect(),
+                )
+            })
+            .collect();
+
+        let mut states = Vec::with_capacity(self.registers.len());
+        for register in &self.registers {
+            if register.q_literals.len() != register.d_literals.len() {
+                return Err(NormalizeError::StateWidthMismatch {
+                    node: register.name.clone(),
+                    expected: register.q_literals.len(),
+                    actual: register.d_literals.len(),
+                });
+            }
+
+            let mut bits = Vec::with_capacity(register.q_literals.len());
+            for (index, q_ref) in register.q_refs.iter().enumerate() {
+                bits.push(StateBitSnapshot {
+                    net: q_ref.net.clone(),
+                    bit: q_ref.bit,
+                    q: register.q_literals[index].into(),
+                    d: register.d_literals[index].into(),
+                });
+            }
+
+            states.push(StateSnapshot {
+                name: register.name.clone(),
+                bits,
+            });
+        }
+        states.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let nodes = self
+            .hasher
+            .nodes()
+            .iter()
+            .enumerate()
+            .map(|(index, node)| NormalizedNode {
+                width: node.width(),
+                id: index,
+                kind: match node.kind() {
+                    StrashKind::Input => NormalizedNodeKind::Input,
+                    StrashKind::Const { bits } => NormalizedNodeKind::Const {
+                        bits: bits_to_string(bits),
+                    },
+                    StrashKind::Op { op, inputs, params } => NormalizedNodeKind::Op {
+                        op: op.clone(),
+                        inputs: inputs
+                            .iter()
+                            .copied()
+                            .map(NormalizedLiteral::from)
+                            .collect(),
+                        params: params.clone(),
+                    },
+                },
+            })
+            .collect();
+
+        Ok(NormalizedModule {
+            inputs,
+            outputs: outputs
+                .into_iter()
+                .map(|(name, bits)| {
+                    (
+                        name,
+                        bits.into_iter().map(NormalizedLiteral::from).collect(),
+                    )
+                })
+                .collect(),
+            states,
+            nodes,
+        })
+    }
+
+    fn initialize_primary_inputs(&mut self) -> Result<(), NormalizeError> {
+        for (name, port) in &self.module.ports {
+            if matches!(port.dir, PortDirection::Input | PortDirection::Inout) {
+                let mut literals = Vec::with_capacity(port.bits as usize);
+                for bit in 0..port.bits {
+                    let literal = self.hasher.input(1);
+                    self.set_net_bit(name, bit, literal)?;
+                    literals.push(literal);
+                }
+                self.inputs.insert(name.clone(), literals);
+            }
+        }
+        Ok(())
+    }
+
+    fn initialize_registers(&mut self) -> Result<(), NormalizeError> {
+        for idx in 0..self.nodes.len() {
+            if !matches!(self.nodes[idx].1.op, NodeOp::Dff | NodeOp::Latch) {
+                continue;
+            }
+
+            let (node_name, q_bitref, d_pin) = {
+                let (name, node) = &self.nodes[idx];
+                let q = node
+                    .pin_map
+                    .get("Q")
+                    .ok_or_else(|| NormalizeError::MissingPin {
+                        node: (*name).clone(),
+                        pin: "Q".to_string(),
+                    })?
+                    .clone();
+                let d = node
+                    .pin_map
+                    .get("D")
+                    .ok_or_else(|| NormalizeError::MissingPin {
+                        node: (*name).clone(),
+                        pin: "D".to_string(),
+                    })?
+                    .clone();
+                ((*name).clone(), q, d)
+            };
+
+            let resolved = resolve_bitref(self.module, &q_bitref).map_err(|source| {
+                NormalizeError::PinResolve {
+                    node: node_name.clone(),
+                    pin: "Q".to_string(),
+                    source,
+                }
+            })?;
+
+            let mut q_refs = Vec::with_capacity(resolved.len());
+            let mut q_literals = Vec::with_capacity(resolved.len());
+            for bit in resolved {
+                match bit {
+                    ResolvedBit::Net(net_bit) => {
+                        let literal = self.hasher.input(1);
+                        self.set_net_bit(net_bit.net.as_str(), net_bit.bit, literal)?;
+                        q_refs.push(net_bit);
+                        q_literals.push(literal);
+                    }
+                    ResolvedBit::Const(_) => {
+                        return Err(NormalizeError::OutputToConstant {
+                            node: node_name.clone(),
+                        });
+                    }
+                }
+            }
+
+            self.registers.push(RegisterInfo {
+                name: node_name,
+                q_refs,
+                q_literals,
+                d_pin,
+                d_literals: Vec::new(),
+            });
+        }
+        Ok(())
+    }
+
+    fn evaluate_combinational_nodes(&mut self) -> Result<(), NormalizeError> {
+        let order = self.order.clone();
+        for node_id in order {
+            let index = node_id.index();
+            let (node_name, node_clone) = {
+                let (name, node) = &self.nodes[index];
+                ((*name).clone(), (*node).clone())
+            };
+
+            if matches!(node_clone.op, NodeOp::Dff | NodeOp::Latch) {
+                continue;
+            }
+
+            let outputs = match node_clone.op.clone() {
+                NodeOp::And => self.compute_bitwise_op(&node_name, &node_clone, NodeOp::And)?,
+                NodeOp::Or => self.compute_bitwise_op(&node_name, &node_clone, NodeOp::Or)?,
+                NodeOp::Xor => self.compute_bitwise_op(&node_name, &node_clone, NodeOp::Xor)?,
+                NodeOp::Xnor => self.compute_xnor(&node_name, &node_clone)?,
+                NodeOp::Not => self.compute_not(&node_name, &node_clone)?,
+                NodeOp::Mux => self.compute_mux(&node_name, &node_clone)?,
+                NodeOp::Add => self.compute_add(&node_name, &node_clone)?,
+                NodeOp::Sub => self.compute_sub(&node_name, &node_clone)?,
+                NodeOp::Slice => self.compute_slice(&node_name, &node_clone)?,
+                NodeOp::Cat => {
+                    return Err(NormalizeError::UnsupportedOp {
+                        node: node_name,
+                        op: NodeOp::Cat,
+                    });
+                }
+                NodeOp::Const => {
+                    return Err(NormalizeError::UnsupportedOp {
+                        node: node_name,
+                        op: NodeOp::Const,
+                    });
+                }
+                NodeOp::Dff | NodeOp::Latch => continue,
+            };
+
+            self.assign_node_outputs(&node_name, &node_clone, outputs)?;
+        }
+        Ok(())
+    }
+
+    fn resolve_register_inputs(&mut self) -> Result<(), NormalizeError> {
+        for idx in 0..self.registers.len() {
+            let (name, d_pin, q_len) = {
+                let register = &self.registers[idx];
+                (
+                    register.name.clone(),
+                    register.d_pin.clone(),
+                    register.q_literals.len(),
+                )
+            };
+
+            let bits = self.resolve_bitref_literals(&name, "D", &d_pin)?;
+
+            if bits.len() != q_len {
+                return Err(NormalizeError::StateWidthMismatch {
+                    node: name,
+                    expected: q_len,
+                    actual: bits.len(),
+                });
+            }
+
+            self.registers[idx].d_literals = bits.into_iter().map(|(_, literal)| literal).collect();
+        }
+        Ok(())
+    }
+
+    fn collect_outputs(&self) -> Result<BTreeMap<String, Vec<Literal>>, NormalizeError> {
+        let mut outputs = BTreeMap::new();
+        for (name, port) in &self.module.ports {
+            if matches!(port.dir, PortDirection::Output | PortDirection::Inout) {
+                let mut bits = Vec::with_capacity(port.bits as usize);
+                for bit in 0..port.bits {
+                    bits.push(self.get_net_bit(name, bit)?);
+                }
+                outputs.insert(name.clone(), bits);
+            }
+        }
+        Ok(outputs)
+    }
+
+    fn ensure_all_bits_resolved(&self) -> Result<(), NormalizeError> {
+        for (name, state) in &self.nets {
+            for (index, literal) in state.bits.iter().enumerate() {
+                if literal.is_none() {
+                    return Err(NormalizeError::UnresolvedNetBit {
+                        net: name.clone(),
+                        bit: index as u32,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn compute_bitwise_op(
+        &mut self,
+        name: &str,
+        node: &Node,
+        op: NodeOp,
+    ) -> Result<Vec<Literal>, NormalizeError> {
+        let a = self.pin_literals(name, node, "A")?;
+        let b = self.pin_literals(name, node, "B")?;
+        if a.len() != b.len() {
+            return Err(NormalizeError::WidthMismatch {
+                node: name.to_string(),
+                op,
+                lhs: a.len(),
+                rhs: b.len(),
+            });
+        }
+
+        Ok(a.into_iter()
+            .zip(b)
+            .map(|(lhs, rhs)| self.hasher.intern_node(op.clone(), [lhs, rhs], 1, None))
+            .collect())
+    }
+
+    fn compute_xnor(&mut self, name: &str, node: &Node) -> Result<Vec<Literal>, NormalizeError> {
+        let mut xor = self.compute_bitwise_op(name, node, NodeOp::Xor)?;
+        for literal in &mut xor {
+            *literal = literal.invert();
+        }
+        Ok(xor)
+    }
+
+    fn compute_not(&mut self, name: &str, node: &Node) -> Result<Vec<Literal>, NormalizeError> {
+        let a = self.pin_literals(name, node, "A")?;
+        Ok(a.into_iter()
+            .map(|literal| self.hasher.intern_node(NodeOp::Not, [literal], 1, None))
+            .collect())
+    }
+
+    fn compute_mux(&mut self, name: &str, node: &Node) -> Result<Vec<Literal>, NormalizeError> {
+        let a = self.pin_literals(name, node, "A")?;
+        let b = self.pin_literals(name, node, "B")?;
+        let sel = self.pin_literals(name, node, "S")?;
+
+        if sel.len() != 1 {
+            return Err(NormalizeError::UnsupportedMuxWidth {
+                node: name.to_string(),
+                width: sel.len(),
+            });
+        }
+
+        if a.len() != b.len() {
+            return Err(NormalizeError::WidthMismatch {
+                node: name.to_string(),
+                op: NodeOp::Mux,
+                lhs: a.len(),
+                rhs: b.len(),
+            });
+        }
+
+        let select = sel[0];
+        let select_inv = select.invert();
+
+        Ok(a.into_iter()
+            .zip(b.into_iter())
+            .map(|(a_bit, b_bit)| {
+                let a_term = self
+                    .hasher
+                    .intern_node(NodeOp::And, [select_inv, a_bit], 1, None);
+                let b_term = self
+                    .hasher
+                    .intern_node(NodeOp::And, [select, b_bit], 1, None);
+                self.hasher
+                    .intern_node(NodeOp::Or, [a_term, b_term], 1, None)
+            })
+            .collect())
+    }
+
+    fn compute_add(&mut self, name: &str, node: &Node) -> Result<Vec<Literal>, NormalizeError> {
+        let a = self.pin_literals(name, node, "A")?;
+        let b = self.pin_literals(name, node, "B")?;
+        if a.len() != b.len() {
+            return Err(NormalizeError::WidthMismatch {
+                node: name.to_string(),
+                op: NodeOp::Add,
+                lhs: a.len(),
+                rhs: b.len(),
+            });
+        }
+
+        let mut result = Vec::with_capacity(a.len());
+        let mut carry = self.hasher.constant_zero(1);
+        for (a_bit, b_bit) in a.into_iter().zip(b.into_iter()) {
+            let sum_ab = self
+                .hasher
+                .intern_node(NodeOp::Xor, [a_bit, b_bit], 1, None);
+            let sum = self
+                .hasher
+                .intern_node(NodeOp::Xor, [sum_ab, carry], 1, None);
+            let carry_ab = self
+                .hasher
+                .intern_node(NodeOp::And, [a_bit, b_bit], 1, None);
+            let carry_sum = self
+                .hasher
+                .intern_node(NodeOp::And, [sum_ab, carry], 1, None);
+            carry = self
+                .hasher
+                .intern_node(NodeOp::Or, [carry_ab, carry_sum], 1, None);
+            result.push(sum);
+        }
+
+        Ok(result)
+    }
+
+    fn compute_sub(&mut self, name: &str, node: &Node) -> Result<Vec<Literal>, NormalizeError> {
+        let a = self.pin_literals(name, node, "A")?;
+        let b = self.pin_literals(name, node, "B")?;
+        if a.len() != b.len() {
+            return Err(NormalizeError::WidthMismatch {
+                node: name.to_string(),
+                op: NodeOp::Sub,
+                lhs: a.len(),
+                rhs: b.len(),
+            });
+        }
+
+        let mut result = Vec::with_capacity(a.len());
+        let mut carry = self.hasher.constant_one(1);
+        for (a_bit, b_bit) in a.into_iter().zip(b.into_iter()) {
+            let b_inv = b_bit.invert();
+            let sum_ab = self
+                .hasher
+                .intern_node(NodeOp::Xor, [a_bit, b_inv], 1, None);
+            let sum = self
+                .hasher
+                .intern_node(NodeOp::Xor, [sum_ab, carry], 1, None);
+            let carry_ab = self
+                .hasher
+                .intern_node(NodeOp::And, [a_bit, b_inv], 1, None);
+            let carry_sum = self
+                .hasher
+                .intern_node(NodeOp::And, [sum_ab, carry], 1, None);
+            carry = self
+                .hasher
+                .intern_node(NodeOp::Or, [carry_ab, carry_sum], 1, None);
+            result.push(sum);
+        }
+
+        Ok(result)
+    }
+
+    fn compute_slice(&mut self, name: &str, node: &Node) -> Result<Vec<Literal>, NormalizeError> {
+        Ok(self.pin_literals(name, node, "A")?)
+    }
+
+    fn assign_node_outputs(
+        &mut self,
+        name: &str,
+        node: &Node,
+        outputs: Vec<Literal>,
+    ) -> Result<(), NormalizeError> {
+        let bitref = node
+            .pin_map
+            .get("Y")
+            .ok_or_else(|| NormalizeError::MissingPin {
+                node: name.to_string(),
+                pin: "Y".to_string(),
+            })?;
+        let resolved =
+            resolve_bitref(self.module, bitref).map_err(|source| NormalizeError::PinResolve {
+                node: name.to_string(),
+                pin: "Y".to_string(),
+                source,
+            })?;
+
+        if resolved.is_empty() {
+            return Err(NormalizeError::OutputWithoutNet {
+                node: name.to_string(),
+            });
+        }
+
+        if resolved.len() != outputs.len() {
+            return Err(NormalizeError::OutputWidthMismatch {
+                node: name.to_string(),
+                expected: resolved.len(),
+                actual: outputs.len(),
+            });
+        }
+
+        for (bit, literal) in resolved.into_iter().zip(outputs.into_iter()) {
+            match bit {
+                ResolvedBit::Net(net_bit) => {
+                    self.set_net_bit(net_bit.net.as_str(), net_bit.bit, literal)?;
+                }
+                ResolvedBit::Const(_) => {
+                    return Err(NormalizeError::OutputToConstant {
+                        node: name.to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn pin_literals(
+        &mut self,
+        name: &str,
+        node: &Node,
+        pin: &str,
+    ) -> Result<Vec<Literal>, NormalizeError> {
+        let bitref = node
+            .pin_map
+            .get(pin)
+            .ok_or_else(|| NormalizeError::MissingPin {
+                node: name.to_string(),
+                pin: pin.to_string(),
+            })?;
+        Ok(self
+            .resolve_bitref_literals(name, pin, bitref)?
+            .into_iter()
+            .map(|(_, literal)| literal)
+            .collect())
+    }
+
+    fn resolve_bitref_literals(
+        &mut self,
+        name: &str,
+        pin: &str,
+        bitref: &BitRef,
+    ) -> Result<Vec<(Option<ResolvedNetBit>, Literal)>, NormalizeError> {
+        let resolved =
+            resolve_bitref(self.module, bitref).map_err(|source| NormalizeError::PinResolve {
+                node: name.to_string(),
+                pin: pin.to_string(),
+                source,
+            })?;
+
+        resolved
+            .into_iter()
+            .map(|bit| match bit {
+                ResolvedBit::Const(value) => Ok((None, self.constant(value))),
+                ResolvedBit::Net(net_bit) => {
+                    let literal = self.get_net_bit(net_bit.net.as_str(), net_bit.bit)?;
+                    Ok((Some(net_bit), literal))
+                }
+            })
+            .collect()
+    }
+
+    fn constant(&mut self, value: bool) -> Literal {
+        if value {
+            self.hasher.constant_one(1)
+        } else {
+            self.hasher.constant_zero(1)
+        }
+    }
+
+    fn get_net_bit(&self, net: &str, bit: u32) -> Result<Literal, NormalizeError> {
+        let state = self
+            .nets
+            .get(net)
+            .ok_or_else(|| NormalizeError::UnknownNet {
+                net: net.to_string(),
+            })?;
+        state
+            .bits
+            .get(bit as usize)
+            .and_then(|entry| *entry)
+            .ok_or_else(|| NormalizeError::UnresolvedNetBit {
+                net: net.to_string(),
+                bit,
+            })
+    }
+
+    fn set_net_bit(&mut self, net: &str, bit: u32, literal: Literal) -> Result<(), NormalizeError> {
+        let state = self
+            .nets
+            .get_mut(net)
+            .ok_or_else(|| NormalizeError::UnknownNet {
+                net: net.to_string(),
+            })?;
+        let slot =
+            state
+                .bits
+                .get_mut(bit as usize)
+                .ok_or_else(|| NormalizeError::UnresolvedNetBit {
+                    net: net.to_string(),
+                    bit,
+                })?;
+        if slot.is_some() {
+            return Err(NormalizeError::DuplicateNetBit {
+                net: net.to_string(),
+                bit,
+            });
+        }
+        *slot = Some(literal);
+        Ok(())
+    }
+}
+
+impl From<Literal> for NormalizedLiteral {
+    fn from(literal: Literal) -> Self {
+        Self {
+            node: literal.node().index(),
+            inverted: literal.is_inverted(),
+        }
+    }
+}
+
+fn bits_to_string(bits: &[bool]) -> String {
+    bits.iter()
+        .rev()
+        .map(|bit| if *bit { '1' } else { '0' })
+        .collect()
+}
+
+fn skip_false(value: &bool) -> bool {
+    !*value
+}

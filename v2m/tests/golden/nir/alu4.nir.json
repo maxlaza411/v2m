@@ -1,0 +1,102 @@
+{
+  "v": "nir-1.1",
+  "design": "alu4",
+  "top": "alu4",
+  "modules": {
+    "alu4": {
+      "ports": {
+        "a": { "dir": "input", "bits": 4 },
+        "b": { "dir": "input", "bits": 4 },
+        "op": { "dir": "input", "bits": 2 },
+        "y": { "dir": "output", "bits": 4 }
+      },
+      "nets": {
+        "a": { "bits": 4 },
+        "b": { "bits": 4 },
+        "op": { "bits": 2 },
+        "y": { "bits": 4 },
+        "sum": { "bits": 4 },
+        "and_ab": { "bits": 4 },
+        "or_ab": { "bits": 4 },
+        "xor_ab": { "bits": 4 },
+        "lo_sel": { "bits": 4 },
+        "hi_sel": { "bits": 4 }
+      },
+      "nodes": {
+        "add_sum": {
+          "uid": "add_sum",
+          "op": "ADD",
+          "width": 4,
+          "pin_map": {
+            "A": { "net": "a", "lsb": 0, "msb": 3 },
+            "B": { "net": "b", "lsb": 0, "msb": 3 },
+            "Y": { "net": "sum", "lsb": 0, "msb": 3 }
+          }
+        },
+        "and_node": {
+          "uid": "and_node",
+          "op": "AND",
+          "width": 4,
+          "pin_map": {
+            "A": { "net": "a", "lsb": 0, "msb": 3 },
+            "B": { "net": "b", "lsb": 0, "msb": 3 },
+            "Y": { "net": "and_ab", "lsb": 0, "msb": 3 }
+          }
+        },
+        "or_node": {
+          "uid": "or_node",
+          "op": "OR",
+          "width": 4,
+          "pin_map": {
+            "A": { "net": "a", "lsb": 0, "msb": 3 },
+            "B": { "net": "b", "lsb": 0, "msb": 3 },
+            "Y": { "net": "or_ab", "lsb": 0, "msb": 3 }
+          }
+        },
+        "xor_node": {
+          "uid": "xor_node",
+          "op": "XOR",
+          "width": 4,
+          "pin_map": {
+            "A": { "net": "a", "lsb": 0, "msb": 3 },
+            "B": { "net": "b", "lsb": 0, "msb": 3 },
+            "Y": { "net": "xor_ab", "lsb": 0, "msb": 3 }
+          }
+        },
+        "mux_lo": {
+          "uid": "mux_lo",
+          "op": "MUX",
+          "width": 4,
+          "pin_map": {
+            "A": { "net": "sum", "lsb": 0, "msb": 3 },
+            "B": { "net": "and_ab", "lsb": 0, "msb": 3 },
+            "S": { "concat": [ { "net": "op", "lsb": 0, "msb": 0 } ] },
+            "Y": { "net": "lo_sel", "lsb": 0, "msb": 3 }
+          }
+        },
+        "mux_hi": {
+          "uid": "mux_hi",
+          "op": "MUX",
+          "width": 4,
+          "pin_map": {
+            "A": { "net": "or_ab", "lsb": 0, "msb": 3 },
+            "B": { "net": "xor_ab", "lsb": 0, "msb": 3 },
+            "S": { "concat": [ { "net": "op", "lsb": 0, "msb": 0 } ] },
+            "Y": { "net": "hi_sel", "lsb": 0, "msb": 3 }
+          }
+        },
+        "mux_final": {
+          "uid": "mux_final",
+          "op": "MUX",
+          "width": 4,
+          "pin_map": {
+            "A": { "net": "lo_sel", "lsb": 0, "msb": 3 },
+            "B": { "net": "hi_sel", "lsb": 0, "msb": 3 },
+            "S": { "concat": [ { "net": "op", "lsb": 1, "msb": 1 } ] },
+            "Y": { "net": "y", "lsb": 0, "msb": 3 }
+          }
+        }
+      }
+    }
+  }
+}

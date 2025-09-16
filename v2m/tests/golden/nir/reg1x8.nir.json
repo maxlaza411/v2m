@@ -1,0 +1,45 @@
+{
+  "v": "nir-1.1",
+  "design": "reg1x8",
+  "top": "reg1x8",
+  "modules": {
+    "reg1x8": {
+      "ports": {
+        "clk": { "dir": "input", "bits": 1 },
+        "en": { "dir": "input", "bits": 1 },
+        "d": { "dir": "input", "bits": 8 },
+        "q": { "dir": "output", "bits": 8 }
+      },
+      "nets": {
+        "clk": { "bits": 1 },
+        "en": { "bits": 1 },
+        "d": { "bits": 8 },
+        "q": { "bits": 8 },
+        "next": { "bits": 8 }
+      },
+      "nodes": {
+        "mux_en": {
+          "uid": "mux_en",
+          "op": "MUX",
+          "width": 8,
+          "pin_map": {
+            "A": { "net": "q", "lsb": 0, "msb": 7 },
+            "B": { "net": "d", "lsb": 0, "msb": 7 },
+            "S": { "concat": [ { "net": "en", "lsb": 0, "msb": 0 } ] },
+            "Y": { "net": "next", "lsb": 0, "msb": 7 }
+          }
+        },
+        "state_reg": {
+          "uid": "state_reg",
+          "op": "DFF",
+          "width": 8,
+          "pin_map": {
+            "D": { "net": "next", "lsb": 0, "msb": 7 },
+            "Q": { "net": "q", "lsb": 0, "msb": 7 },
+            "CLK": { "net": "clk", "lsb": 0, "msb": 0 }
+          }
+        }
+      }
+    }
+  }
+}
