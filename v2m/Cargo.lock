@@ -781,6 +781,7 @@ dependencies = [
 name = "v2m-evaluator"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "thiserror",
  "v2m-formats",
  "v2m-nir",
