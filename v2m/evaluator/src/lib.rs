@@ -1,8 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use thiserror::Error;
 use v2m_formats::nir::{BitRef, Module, Nir, NodeOp, PortDirection};
 use v2m_nir::{BuildError as GraphBuildError, EvalOrderError, ModuleGraph, NodeId};
+
+mod pin_binding;
+
+use pin_binding::{bind_bitref, BitBinding, ConstPool, PinBindingError};
 
 const WORD_BITS: usize = 64;
 
@@ -73,6 +77,13 @@ pub enum Error {
     EvalOrder(#[from] EvalOrderError),
     #[error(transparent)]
     Packed(#[from] PackedError),
+    #[error("failed to bind pin `{pin}` on node `{node}`: {source}")]
+    PinBinding {
+        node: String,
+        pin: String,
+        #[source]
+        source: PinBindingError,
+    },
 }
 
 #[allow(dead_code)]
@@ -87,6 +98,7 @@ pub struct Evaluator<'nir> {
     num_vectors: usize,
     nets: Packed,
     net_indices: HashMap<String, PackedIndex>,
+    net_indices_by_id: Vec<PackedIndex>,
     regs_cur: Packed,
     regs_next: Packed,
     reg_indices: HashMap<String, PackedIndex>,
@@ -94,6 +106,8 @@ pub struct Evaluator<'nir> {
     input_ports: HashMap<String, PackedIndex>,
     outputs: Packed,
     output_ports: HashMap<String, PackedIndex>,
+    node_bindings: HashMap<NodeId, NodePinBindings>,
+    const_pool: ConstPool,
     comb_kernels: HashMap<NodeId, NodeKernel>,
 }
 
@@ -228,6 +242,10 @@ impl PackedBitMask {
         &mut self.words
     }
 }
+
+#[derive(Default)]
+struct NodePinBindings {
+    pins: BTreeMap<String, BitBinding>,
 
 #[derive(Clone, Debug)]
 struct ConstKernel {
@@ -653,9 +671,11 @@ impl<'nir> Evaluator<'nir> {
 
         let mut nets = Packed::new(num_vectors);
         let mut net_indices = HashMap::new();
+        let mut net_indices_by_id = Vec::with_capacity(module.nets.len());
         for (name, net) in &module.nets {
             let index = nets.allocate(net.bits as usize);
             net_indices.insert(name.clone(), index);
+            net_indices_by_id.push(index);
         }
 
         let mut regs_cur = Packed::new(num_vectors);
@@ -667,6 +687,28 @@ impl<'nir> Evaluator<'nir> {
             }
         }
         let regs_next = regs_cur.duplicate_layout();
+
+        let mut node_bindings: HashMap<NodeId, NodePinBindings> = HashMap::new();
+        let mut const_pool = ConstPool::default();
+        for (node_name, node) in &module.nodes {
+            let node_id = graph
+                .node_id(node_name.as_str())
+                .expect("node must exist in graph");
+            let entry = node_bindings
+                .entry(node_id)
+                .or_insert_with(NodePinBindings::default);
+            for (pin_name, bitref) in &node.pin_map {
+                let binding =
+                    bind_bitref(module, &graph, bitref, &mut const_pool).map_err(|source| {
+                        Error::PinBinding {
+                            node: node_name.clone(),
+                            pin: pin_name.clone(),
+                            source,
+                        }
+                    })?;
+                entry.pins.insert(pin_name.clone(), binding);
+            }
+        }
 
         let mut inputs = Packed::new(num_vectors);
         let mut outputs = Packed::new(num_vectors);
@@ -712,6 +754,7 @@ impl<'nir> Evaluator<'nir> {
             num_vectors,
             nets,
             net_indices,
+            net_indices_by_id,
             regs_cur,
             regs_next,
             reg_indices,
@@ -719,6 +762,8 @@ impl<'nir> Evaluator<'nir> {
             input_ports,
             outputs,
             output_ports,
+            node_bindings,
+            const_pool,
             comb_kernels,
         })
     }
