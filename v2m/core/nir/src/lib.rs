@@ -137,6 +137,20 @@ pub struct ModuleGraph {
     node_lookup: HashMap<String, NodeId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleMetrics {
+    pub node_count: usize,
+    pub net_count: usize,
+    pub max_depth: usize,
+    pub depth_histogram: Vec<usize>,
+}
+
+impl ModuleMetrics {
+    pub fn combinational_node_count(&self) -> usize {
+        self.depth_histogram.iter().sum()
+    }
+}
+
 impl ModuleGraph {
     pub fn from_module(module: &Module) -> Result<Self, BuildError> {
         let mut nets = Vec::with_capacity(module.nets.len());
@@ -325,6 +339,47 @@ impl ModuleGraph {
         Ok(order)
     }
 
+    pub fn compute_depth(&self, order: &[NodeId]) -> Vec<(NodeId, usize)> {
+        let mut depth_by_node = vec![0usize; self.nodes.len()];
+        let mut result = Vec::with_capacity(order.len());
+
+        for &node_id in order {
+            debug_assert!(self.nodes[node_id.index()].is_combinational());
+            let level = self.nodes[node_id.index()]
+                .fanins()
+                .iter()
+                .map(|fanin| depth_by_node[fanin.index()] + 1)
+                .max()
+                .unwrap_or(0);
+            depth_by_node[node_id.index()] = level;
+            result.push((node_id, level));
+        }
+
+        result
+    }
+
+    pub fn metrics(&self) -> Result<ModuleMetrics, EvalOrderError> {
+        let order = self.combinational_topological_order()?;
+        let depths = self.compute_depth(&order);
+
+        let mut histogram = Vec::new();
+        for &(_, level) in &depths {
+            if histogram.len() <= level {
+                histogram.resize(level + 1, 0);
+            }
+            histogram[level] += 1;
+        }
+
+        let max_depth = depths.iter().map(|&(_, level)| level).max().unwrap_or(0);
+
+        Ok(ModuleMetrics {
+            node_count: self.nodes.len(),
+            net_count: self.nets.len(),
+            max_depth,
+            depth_histogram: histogram,
+        })
+    }
+
     fn find_cycle_in_candidates(&self, candidates: &[bool]) -> Option<Vec<NodeId>> {
         let mut visited = vec![false; self.nodes.len()];
         let mut on_stack = vec![false; self.nodes.len()];
@@ -453,6 +508,151 @@ mod tests {
             lsb,
             msb,
         })
+    }
+
+    fn ripple_xor_graph(stages: usize) -> ModuleGraph {
+        assert!(stages > 0);
+
+        let mut nets = BTreeMap::new();
+        for index in 0..=stages {
+            nets.insert(
+                format!("in_{index}"),
+                NirNet {
+                    bits: 1,
+                    attrs: None,
+                },
+            );
+        }
+
+        if stages > 1 {
+            for index in 0..(stages - 1) {
+                nets.insert(
+                    format!("stage_{index}"),
+                    NirNet {
+                        bits: 1,
+                        attrs: None,
+                    },
+                );
+            }
+        }
+
+        nets.insert(
+            "out".to_string(),
+            NirNet {
+                bits: 1,
+                attrs: None,
+            },
+        );
+
+        let mut nodes = BTreeMap::new();
+        let mut prev_output: Option<String> = None;
+
+        for stage in 0..stages {
+            let node_name = format!("xor_{stage}");
+            let input_a = if stage == 0 {
+                format!("in_{stage}")
+            } else {
+                prev_output.as_ref().expect("previous stage output").clone()
+            };
+            let input_b = format!("in_{}", stage + 1);
+            let output = if stage + 1 == stages {
+                "out".to_string()
+            } else {
+                format!("stage_{stage}")
+            };
+
+            let node = NirNode {
+                uid: node_name.clone(),
+                op: NodeOp::Xor,
+                width: 1,
+                pin_map: BTreeMap::from([
+                    ("A".to_string(), net_bit(&input_a, 0, 0)),
+                    ("B".to_string(), net_bit(&input_b, 0, 0)),
+                    ("Y".to_string(), net_bit(&output, 0, 0)),
+                ]),
+                params: None,
+                attrs: None,
+            };
+            nodes.insert(node_name, node);
+            prev_output = Some(output);
+        }
+
+        let module = NirModule {
+            ports: BTreeMap::new(),
+            nets,
+            nodes,
+        };
+
+        ModuleGraph::from_module(&module).expect("build graph")
+    }
+
+    fn tree_xor_graph(leaves: usize) -> ModuleGraph {
+        assert!(leaves.is_power_of_two());
+        assert!(leaves >= 2);
+
+        let mut nets = BTreeMap::new();
+        for index in 0..leaves {
+            nets.insert(
+                format!("in_{index}"),
+                NirNet {
+                    bits: 1,
+                    attrs: None,
+                },
+            );
+        }
+
+        let mut nodes = BTreeMap::new();
+        let mut level_inputs: Vec<String> =
+            (0..leaves).map(|index| format!("in_{index}")).collect();
+        let mut level = 0usize;
+
+        while level_inputs.len() > 1 {
+            let mut next_level = Vec::with_capacity(level_inputs.len() / 2);
+            for pair in 0..(level_inputs.len() / 2) {
+                let a_name = level_inputs[2 * pair].clone();
+                let b_name = level_inputs[2 * pair + 1].clone();
+                let output_name = if level_inputs.len() == 2 {
+                    "out".to_string()
+                } else {
+                    format!("level{level}_{pair}")
+                };
+
+                nets.insert(
+                    output_name.clone(),
+                    NirNet {
+                        bits: 1,
+                        attrs: None,
+                    },
+                );
+
+                let node_name = format!("xor_l{level}_{pair}");
+                let node = NirNode {
+                    uid: node_name.clone(),
+                    op: NodeOp::Xor,
+                    width: 1,
+                    pin_map: BTreeMap::from([
+                        ("A".to_string(), net_bit(&a_name, 0, 0)),
+                        ("B".to_string(), net_bit(&b_name, 0, 0)),
+                        ("Y".to_string(), net_bit(&output_name, 0, 0)),
+                    ]),
+                    params: None,
+                    attrs: None,
+                };
+                nodes.insert(node_name, node);
+                next_level.push(output_name);
+            }
+
+            level_inputs = next_level;
+            level += 1;
+        }
+
+        let module = NirModule {
+            ports: BTreeMap::new(),
+            nets,
+            nodes,
+        };
+
+        ModuleGraph::from_module(&module).expect("build graph")
     }
 
     #[test]
@@ -734,5 +934,63 @@ mod tests {
         let q = graph.net(graph.net_id("q").unwrap());
         assert_eq!(q.drivers(), &[reg_id]);
         assert_eq!(q.loads(), &[inv_id]);
+    }
+
+    #[test]
+    fn ripple_xor_depth_increases_linearly() {
+        let stages = 7;
+        let graph = ripple_xor_graph(stages);
+        let order = graph
+            .combinational_topological_order()
+            .expect("topological order");
+        let depths = graph.compute_depth(&order);
+
+        let mut depth_by_name = HashMap::new();
+        for (node_id, level) in depths {
+            depth_by_name.insert(graph.node(node_id).name().to_string(), level);
+        }
+
+        for stage in 0..stages {
+            let name = format!("xor_{stage}");
+            assert_eq!(
+                depth_by_name.get(name.as_str()),
+                Some(&stage),
+                "expected {name} to have depth {stage}"
+            );
+        }
+
+        let metrics = graph.metrics().expect("metrics");
+        assert_eq!(metrics.node_count, graph.nodes().len());
+        assert_eq!(metrics.net_count, graph.nets().len());
+        assert_eq!(metrics.max_depth, stages - 1);
+        assert_eq!(metrics.combinational_node_count(), stages);
+        assert_eq!(metrics.depth_histogram.len(), stages);
+        assert!(metrics.depth_histogram.iter().all(|&count| count == 1));
+    }
+
+    #[test]
+    fn tree_xor_has_log_depth() {
+        let leaves = 8;
+        let graph = tree_xor_graph(leaves);
+        let order = graph
+            .combinational_topological_order()
+            .expect("topological order");
+        let depths = graph.compute_depth(&order);
+
+        let mut depth_by_name = HashMap::new();
+        for (node_id, level) in depths {
+            depth_by_name.insert(graph.node(node_id).name().to_string(), level);
+        }
+
+        assert_eq!(depth_by_name.get("xor_l0_0"), Some(&0));
+        assert_eq!(depth_by_name.get("xor_l1_0"), Some(&1));
+        assert_eq!(depth_by_name.get("xor_l2_0"), Some(&2));
+
+        let metrics = graph.metrics().expect("metrics");
+        assert_eq!(metrics.node_count, graph.nodes().len());
+        assert_eq!(metrics.net_count, graph.nets().len());
+        assert_eq!(metrics.max_depth, 2);
+        assert_eq!(metrics.combinational_node_count(), 7);
+        assert_eq!(metrics.depth_histogram, vec![4, 2, 1]);
     }
 }
