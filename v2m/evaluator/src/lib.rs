@@ -61,6 +61,8 @@ pub struct Evaluator<'nir> {
     module: &'nir Module,
     graph: ModuleGraph,
     topo: Vec<NodeId>,
+    topo_level_offsets: Vec<usize>,
+    topo_level_map: Vec<Option<usize>>,
     options: SimOptions,
     num_vectors: usize,
     nets: Packed,
@@ -179,7 +181,8 @@ impl<'nir> Evaluator<'nir> {
             })?;
 
         let graph = ModuleGraph::from_module(module)?;
-        let topo = graph.combinational_topological_order()?;
+        let (topo, topo_level_offsets, topo_level_map) =
+            graph.combinational_topological_levels()?.into_parts();
 
         let mut nets = Packed::new(num_vectors);
         let mut net_indices = HashMap::new();
@@ -228,6 +231,8 @@ impl<'nir> Evaluator<'nir> {
             module,
             graph,
             topo,
+            topo_level_offsets,
+            topo_level_map,
             options,
             num_vectors,
             nets,

@@ -157,6 +157,52 @@ impl ModuleMetrics {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CombTopoLevels {
+    order: Vec<NodeId>,
+    level_offsets: Vec<usize>,
+    level_by_node: Vec<Option<usize>>,
+}
+
+impl CombTopoLevels {
+    pub fn order(&self) -> &[NodeId] {
+        &self.order
+    }
+
+    pub fn levels(&self) -> usize {
+        self.level_offsets.len().saturating_sub(1)
+    }
+
+    pub fn level(&self, level: usize) -> &[NodeId] {
+        debug_assert!(level < self.levels());
+        let start = self.level_offsets[level];
+        let end = self.level_offsets[level + 1];
+        &self.order[start..end]
+    }
+
+    pub fn level_offsets(&self) -> &[usize] {
+        &self.level_offsets
+    }
+
+    pub fn level_of(&self, node: NodeId) -> Option<usize> {
+        self.level_by_node[node.index()]
+    }
+
+    pub fn iter_levels(&self) -> impl Iterator<Item = &[NodeId]> {
+        self.level_offsets
+            .windows(2)
+            .map(move |window| &self.order[window[0]..window[1]])
+    }
+
+    pub fn into_order(self) -> Vec<NodeId> {
+        self.order
+    }
+
+    pub fn into_parts(self) -> (Vec<NodeId>, Vec<usize>, Vec<Option<usize>>) {
+        (self.order, self.level_offsets, self.level_by_node)
+    }
+}
+
 impl ModuleGraph {
     pub fn from_module(module: &Module) -> Result<Self, BuildError> {
         let mut nets = Vec::with_capacity(module.nets.len());
@@ -279,12 +325,14 @@ impl ModuleGraph {
         self.node_lookup.get(name).copied()
     }
 
-    pub fn combinational_topological_order(&self) -> Result<Vec<NodeId>, EvalOrderError> {
+    pub fn combinational_topological_levels(&self) -> Result<CombTopoLevels, EvalOrderError> {
         let mut indegree = vec![0usize; self.nodes.len()];
         let mut ready = BinaryHeap::new();
         let mut order = Vec::new();
         let mut processed = vec![false; self.nodes.len()];
         let mut combinational_count = 0usize;
+        let mut level_by_node = vec![None; self.nodes.len()];
+        let mut level_counts = Vec::new();
 
         for (index, node) in self.nodes.iter().enumerate() {
             if !node.is_combinational() {
@@ -295,6 +343,7 @@ impl ModuleGraph {
             indegree[index] = node.fanins.len();
             if indegree[index] == 0 {
                 ready.push(Reverse(NodeId(index)));
+                level_by_node[index] = Some(0);
             }
         }
 
@@ -302,9 +351,36 @@ impl ModuleGraph {
             order.push(node_id);
             processed[node_id.index()] = true;
 
+            let level = match level_by_node[node_id.index()] {
+                Some(level) => level,
+                None => {
+                    debug_assert!(false, "ready node must have an assigned level");
+                    0
+                }
+            };
+
+            if level_counts.len() <= level {
+                level_counts.resize(level + 1, 0);
+            }
+            level_counts[level] += 1;
+
             for &succ in self.nodes[node_id.index()].fanouts() {
                 indegree[succ.index()] -= 1;
+
+                let next_level = level + 1;
+                match &mut level_by_node[succ.index()] {
+                    Some(existing) => {
+                        if *existing < next_level {
+                            *existing = next_level;
+                        }
+                    }
+                    None => level_by_node[succ.index()] = Some(next_level),
+                }
+
                 if indegree[succ.index()] == 0 {
+                    if level_by_node[succ.index()].is_none() {
+                        level_by_node[succ.index()] = Some(next_level);
+                    }
                     ready.push(Reverse(succ));
                 }
             }
@@ -342,7 +418,25 @@ impl ModuleGraph {
             return Err(EvalOrderError::CombinationalLoop { cycle });
         }
 
-        Ok(order)
+        let mut level_offsets = Vec::with_capacity(level_counts.len() + 1);
+        level_offsets.push(0);
+        for count in level_counts {
+            let next = level_offsets.last().copied().unwrap() + count;
+            level_offsets.push(next);
+        }
+
+        debug_assert_eq!(level_offsets.last().copied().unwrap_or(0), order.len());
+
+        Ok(CombTopoLevels {
+            order,
+            level_offsets,
+            level_by_node,
+        })
+    }
+
+    pub fn combinational_topological_order(&self) -> Result<Vec<NodeId>, EvalOrderError> {
+        self.combinational_topological_levels()
+            .map(CombTopoLevels::into_order)
     }
 
     pub fn compute_depth(&self, order: &[NodeId]) -> Vec<(NodeId, usize)> {
@@ -365,18 +459,9 @@ impl ModuleGraph {
     }
 
     pub fn metrics(&self) -> Result<ModuleMetrics, EvalOrderError> {
-        let order = self.combinational_topological_order()?;
-        let depths = self.compute_depth(&order);
-
-        let mut histogram = Vec::new();
-        for &(_, level) in &depths {
-            if histogram.len() <= level {
-                histogram.resize(level + 1, 0);
-            }
-            histogram[level] += 1;
-        }
-
-        let max_depth = depths.iter().map(|&(_, level)| level).max().unwrap_or(0);
+        let levels = self.combinational_topological_levels()?;
+        let histogram: Vec<usize> = levels.iter_levels().map(|level| level.len()).collect();
+        let max_depth = histogram.len().saturating_sub(1);
 
         Ok(ModuleMetrics {
             node_count: self.nodes.len(),
@@ -778,9 +863,10 @@ mod tests {
     fn combinational_topological_order_full_adder() {
         let graph = module_graph_from_example("full_adder");
 
-        let order = graph
-            .combinational_topological_order()
-            .expect("topological order");
+        let levels = graph
+            .combinational_topological_levels()
+            .expect("topological levels");
+        let order = levels.order();
 
         let mut positions = HashMap::new();
         for (index, node_id) in order.iter().enumerate() {
@@ -788,6 +874,9 @@ mod tests {
         }
 
         for (index, node_id) in order.iter().enumerate() {
+            let node_level = levels
+                .level_of(*node_id)
+                .expect("combinational node must have a level");
             for &fanin in graph.node(*node_id).fanins() {
                 let fanin_pos = *positions.get(&fanin).expect("fanin in order");
                 assert!(
@@ -795,6 +884,13 @@ mod tests {
                     "node {} must come after fanin {}",
                     graph.node(*node_id).name(),
                     graph.node(fanin).name(),
+                );
+                let fanin_level = levels.level_of(fanin).expect("fanin must be combinational");
+                assert!(
+                    fanin_level <= node_level,
+                    "fanin {} must not be on a deeper level than {}",
+                    graph.node(fanin).name(),
+                    graph.node(*node_id).name(),
                 );
             }
         }
@@ -805,6 +901,11 @@ mod tests {
             .filter(|node| !matches!(node.op(), NodeOp::Dff | NodeOp::Latch))
             .count();
         assert_eq!(order.len(), combinational_nodes);
+
+        let flat_order = graph
+            .combinational_topological_order()
+            .expect("topological order");
+        assert_eq!(flat_order.as_slice(), order);
     }
 
     #[test]
@@ -858,7 +959,7 @@ mod tests {
 
         let graph = ModuleGraph::from_module(&module).expect("build graph");
         let err = graph
-            .combinational_topological_order()
+            .combinational_topological_levels()
             .expect_err("must detect loop");
 
         let cycle = match &err {
@@ -946,14 +1047,16 @@ mod tests {
     fn ripple_xor_depth_increases_linearly() {
         let stages = 7;
         let graph = ripple_xor_graph(stages);
-        let order = graph
-            .combinational_topological_order()
-            .expect("topological order");
-        let depths = graph.compute_depth(&order);
+        let levels = graph
+            .combinational_topological_levels()
+            .expect("topological levels");
 
         let mut depth_by_name = HashMap::new();
-        for (node_id, level) in depths {
-            depth_by_name.insert(graph.node(node_id).name().to_string(), level);
+        for node_id in levels.order() {
+            let level = levels
+                .level_of(*node_id)
+                .expect("combinational node must have a level");
+            depth_by_name.insert(graph.node(*node_id).name().to_string(), level);
         }
 
         for stage in 0..stages {
@@ -970,6 +1073,7 @@ mod tests {
         assert_eq!(metrics.net_count, graph.nets().len());
         assert_eq!(metrics.max_depth, stages - 1);
         assert_eq!(metrics.combinational_node_count(), stages);
+        assert_eq!(levels.levels(), stages);
         assert_eq!(metrics.depth_histogram.len(), stages);
         assert!(metrics.depth_histogram.iter().all(|&count| count == 1));
     }
@@ -978,19 +1082,13 @@ mod tests {
     fn tree_xor_has_log_depth() {
         let leaves = 8;
         let graph = tree_xor_graph(leaves);
-        let order = graph
-            .combinational_topological_order()
-            .expect("topological order");
-        let depths = graph.compute_depth(&order);
+        let levels = graph
+            .combinational_topological_levels()
+            .expect("topological levels");
 
-        let mut depth_by_name = HashMap::new();
-        for (node_id, level) in depths {
-            depth_by_name.insert(graph.node(node_id).name().to_string(), level);
-        }
-
-        assert_eq!(depth_by_name.get("xor_l0_0"), Some(&0));
-        assert_eq!(depth_by_name.get("xor_l1_0"), Some(&1));
-        assert_eq!(depth_by_name.get("xor_l2_0"), Some(&2));
+        assert_eq!(levels.level_of(graph.node_id("xor_l0_0").unwrap()), Some(0));
+        assert_eq!(levels.level_of(graph.node_id("xor_l1_0").unwrap()), Some(1));
+        assert_eq!(levels.level_of(graph.node_id("xor_l2_0").unwrap()), Some(2));
 
         let metrics = graph.metrics().expect("metrics");
         assert_eq!(metrics.node_count, graph.nodes().len());
@@ -998,5 +1096,12 @@ mod tests {
         assert_eq!(metrics.max_depth, 2);
         assert_eq!(metrics.combinational_node_count(), 7);
         assert_eq!(metrics.depth_histogram, vec![4, 2, 1]);
+        assert_eq!(
+            metrics.depth_histogram,
+            levels
+                .iter_levels()
+                .map(|level| level.len())
+                .collect::<Vec<_>>()
+        );
     }
 }
