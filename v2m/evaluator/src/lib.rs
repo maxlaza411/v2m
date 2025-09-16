@@ -406,10 +406,12 @@ fn unpack_port_biguints(
     }
 
     Ok(result)
+}
 
 #[derive(Default)]
 struct NodePinBindings {
     pins: BTreeMap<String, BitBinding>,
+}
 
 #[derive(Clone, Debug)]
 struct ConstKernel {
@@ -636,7 +638,6 @@ mod tests {
             .collect()
     }
     use serde_json::Value;
-    use std::collections::BTreeMap;
     use v2m_formats::nir::{
         BitRef, BitRefNet, Module as NirModule, Net as NirNet, Node as NirNode, Port as NirPort,
     };
@@ -860,6 +861,8 @@ mod tests {
             .unpack_outputs_to_biguints(&wrong_vectors)
             .unwrap_err();
         assert!(matches!(err, PortValueError::PackedVectorMismatch { .. }));
+    }
+
     fn net_bit(name: &str) -> BitRef {
         BitRef::Net(BitRefNet {
             net: name.to_string(),
