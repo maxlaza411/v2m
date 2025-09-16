@@ -1,4 +1,6 @@
-use std::collections::{BTreeSet, HashMap};
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, BinaryHeap, HashMap};
+use std::fmt;
 
 use v2m_formats::nir::{Module, NodeOp};
 use v2m_formats::{resolve_bitref, BitRef, ResolvedBit};
@@ -39,6 +41,23 @@ pub enum BuildError {
         net: String,
     },
 }
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum EvalOrderError {
+    CombinationalLoop { cycle: Vec<String> },
+}
+
+impl fmt::Display for EvalOrderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CombinationalLoop { cycle } => {
+                write!(f, "combinational loop detected: {}", cycle.join(" -> "))
+            }
+        }
+    }
+}
+
+impl std::error::Error for EvalOrderError {}
 
 #[derive(Debug, Clone)]
 pub struct Net {
@@ -239,6 +258,134 @@ impl ModuleGraph {
     pub fn node_id(&self, name: &str) -> Option<NodeId> {
         self.node_lookup.get(name).copied()
     }
+
+    pub fn combinational_topological_order(&self) -> Result<Vec<NodeId>, EvalOrderError> {
+        let mut indegree = vec![0usize; self.nodes.len()];
+        let mut ready = BinaryHeap::new();
+        let mut order = Vec::new();
+        let mut processed = vec![false; self.nodes.len()];
+        let mut combinational_count = 0usize;
+
+        for (index, node) in self.nodes.iter().enumerate() {
+            if !node.is_combinational() {
+                continue;
+            }
+
+            combinational_count += 1;
+            indegree[index] = node.fanins.len();
+            if indegree[index] == 0 {
+                ready.push(Reverse(NodeId(index)));
+            }
+        }
+
+        while let Some(Reverse(node_id)) = ready.pop() {
+            order.push(node_id);
+            processed[node_id.index()] = true;
+
+            for &succ in self.nodes[node_id.index()].fanouts() {
+                indegree[succ.index()] -= 1;
+                if indegree[succ.index()] == 0 {
+                    ready.push(Reverse(succ));
+                }
+            }
+        }
+
+        if order.len() != combinational_count {
+            let mut candidates = vec![false; self.nodes.len()];
+            for (index, node) in self.nodes.iter().enumerate() {
+                if node.is_combinational() && !processed[index] {
+                    candidates[index] = true;
+                }
+            }
+
+            let cycle_nodes = self
+                .find_cycle_in_candidates(&candidates)
+                .unwrap_or_else(|| {
+                    self.nodes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, _)| {
+                            if candidates[index] {
+                                Some(NodeId(index))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                });
+
+            let cycle = cycle_nodes
+                .into_iter()
+                .map(|id| self.node(id).name().to_string())
+                .collect();
+
+            return Err(EvalOrderError::CombinationalLoop { cycle });
+        }
+
+        Ok(order)
+    }
+
+    fn find_cycle_in_candidates(&self, candidates: &[bool]) -> Option<Vec<NodeId>> {
+        let mut visited = vec![false; self.nodes.len()];
+        let mut on_stack = vec![false; self.nodes.len()];
+        let mut stack = Vec::new();
+
+        for (index, &candidate) in candidates.iter().enumerate() {
+            if !candidate || visited[index] {
+                continue;
+            }
+
+            if let Some(cycle) = self.find_cycle_dfs(
+                NodeId(index),
+                candidates,
+                &mut visited,
+                &mut on_stack,
+                &mut stack,
+            ) {
+                return Some(cycle);
+            }
+        }
+
+        None
+    }
+
+    fn find_cycle_dfs(
+        &self,
+        node_id: NodeId,
+        candidates: &[bool],
+        visited: &mut [bool],
+        on_stack: &mut [bool],
+        stack: &mut Vec<NodeId>,
+    ) -> Option<Vec<NodeId>> {
+        visited[node_id.index()] = true;
+        on_stack[node_id.index()] = true;
+        stack.push(node_id);
+
+        for &succ in self.nodes[node_id.index()].fanouts() {
+            if !candidates[succ.index()] {
+                continue;
+            }
+
+            if !visited[succ.index()] {
+                if let Some(cycle) = self.find_cycle_dfs(succ, candidates, visited, on_stack, stack)
+                {
+                    return Some(cycle);
+                }
+            } else if on_stack[succ.index()] {
+                let start = stack
+                    .iter()
+                    .rposition(|&id| id == succ)
+                    .expect("cycle node must be in stack");
+                let mut cycle = stack[start..].to_vec();
+                cycle.push(succ);
+                return Some(cycle);
+            }
+        }
+
+        stack.pop();
+        on_stack[node_id.index()] = false;
+        None
+    }
 }
 
 fn collect_pin_nets(
@@ -285,7 +432,7 @@ fn is_output_pin(op: &NodeOp, pin_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::path::PathBuf;
     use v2m_formats::nir::{
         BitRefConcat, BitRefNet, Module as NirModule, Net as NirNet, Node as NirNode,
@@ -419,6 +566,111 @@ mod tests {
         let sel_n = graph.net(graph.net_id("sel_n").unwrap());
         assert_eq!(sel_n.drivers(), &[inv_sel_id]);
         assert_eq!(sel_n.loads(), &[mux_id]);
+    }
+
+    #[test]
+    fn combinational_topological_order_full_adder() {
+        let graph = module_graph_from_example("full_adder");
+
+        let order = graph
+            .combinational_topological_order()
+            .expect("topological order");
+
+        let mut positions = HashMap::new();
+        for (index, node_id) in order.iter().enumerate() {
+            positions.insert(*node_id, index);
+        }
+
+        for (index, node_id) in order.iter().enumerate() {
+            for &fanin in graph.node(*node_id).fanins() {
+                let fanin_pos = *positions.get(&fanin).expect("fanin in order");
+                assert!(
+                    fanin_pos < index,
+                    "node {} must come after fanin {}",
+                    graph.node(*node_id).name(),
+                    graph.node(fanin).name(),
+                );
+            }
+        }
+
+        let combinational_nodes = graph
+            .nodes()
+            .iter()
+            .filter(|node| !matches!(node.op(), NodeOp::Dff | NodeOp::Latch))
+            .count();
+        assert_eq!(order.len(), combinational_nodes);
+    }
+
+    #[test]
+    fn combinational_loop_detection() {
+        let mut nets = BTreeMap::new();
+        for name in ["a", "b"] {
+            nets.insert(
+                name.to_string(),
+                NirNet {
+                    bits: 1,
+                    attrs: None,
+                },
+            );
+        }
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "not_a".to_string(),
+            NirNode {
+                uid: "not_a".to_string(),
+                op: NodeOp::Not,
+                width: 1,
+                pin_map: BTreeMap::from([
+                    ("A".to_string(), net_bit("b", 0, 0)),
+                    ("Y".to_string(), net_bit("a", 0, 0)),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+        nodes.insert(
+            "not_b".to_string(),
+            NirNode {
+                uid: "not_b".to_string(),
+                op: NodeOp::Not,
+                width: 1,
+                pin_map: BTreeMap::from([
+                    ("A".to_string(), net_bit("a", 0, 0)),
+                    ("Y".to_string(), net_bit("b", 0, 0)),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+
+        let module = NirModule {
+            ports: BTreeMap::new(),
+            nets,
+            nodes,
+        };
+
+        let graph = ModuleGraph::from_module(&module).expect("build graph");
+        let err = graph
+            .combinational_topological_order()
+            .expect_err("must detect loop");
+
+        let cycle = match &err {
+            EvalOrderError::CombinationalLoop { cycle } => cycle,
+        };
+        assert_eq!(
+            cycle,
+            &vec![
+                "not_a".to_string(),
+                "not_b".to_string(),
+                "not_a".to_string()
+            ]
+        );
+
+        assert_eq!(
+            err.to_string(),
+            "combinational loop detected: not_a -> not_b -> not_a"
+        );
     }
 
     #[test]
