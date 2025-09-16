@@ -778,6 +778,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "v2m-evaluator"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "v2m-formats",
+ "v2m-nir",
+]
+
+[[package]]
 name = "v2m-formats"
 version = "0.1.0"
 dependencies = [
