@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::fmt;
+use std::io::Write;
 
 mod lint;
 mod strash;
@@ -490,6 +491,250 @@ fn is_output_pin(op: &NodeOp, pin_name: &str) -> bool {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DotExportOptions {
+    pub show_ids: bool,
+    pub show_levels: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DotExportError {
+    #[error("failed to build module graph: {0}")]
+    Build(#[from] BuildError),
+    #[error("failed to analyze module graph: {0}")]
+    Eval(#[from] EvalOrderError),
+    #[error("failed to write dot file: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+pub fn export_dot(
+    module: &Module,
+    path: impl AsRef<std::path::Path>,
+    options: DotExportOptions,
+) -> Result<(), DotExportError> {
+    let mut file = std::fs::File::create(path)?;
+    write_dot_to_writer(module, &mut file, &options)?;
+    Ok(())
+}
+
+fn write_dot_to_writer<W: Write>(
+    module: &Module,
+    writer: &mut W,
+    options: &DotExportOptions,
+) -> Result<(), DotExportError> {
+    let graph = ModuleGraph::from_module(module)?;
+    let order = graph.combinational_topological_order()?;
+    let depths = graph.compute_depth(&order);
+
+    let mut depth_histogram = Vec::new();
+    for &(_, level) in &depths {
+        if depth_histogram.len() <= level {
+            depth_histogram.resize(level + 1, 0);
+        }
+        depth_histogram[level] += 1;
+    }
+
+    let max_depth = depths.iter().map(|&(_, level)| level).max().unwrap_or(0);
+    let metrics = ModuleMetrics {
+        node_count: graph.nodes().len(),
+        net_count: graph.nets().len(),
+        max_depth,
+        depth_histogram,
+    };
+    debug_assert_eq!(metrics.combinational_node_count(), depths.len());
+
+    let mut level_by_node = vec![None; graph.nodes().len()];
+    for &(node_id, level) in &depths {
+        level_by_node[node_id.index()] = Some(level);
+    }
+
+    let mut nodes_by_level = if metrics.depth_histogram.is_empty() {
+        Vec::new()
+    } else {
+        vec![Vec::new(); metrics.depth_histogram.len()]
+    };
+    for &(node_id, level) in &depths {
+        nodes_by_level[level].push(node_id);
+    }
+
+    let mut sequential_nodes = Vec::new();
+    for index in 0..graph.nodes().len() {
+        if level_by_node[index].is_none() {
+            sequential_nodes.push(NodeId(index));
+        }
+    }
+
+    let edge_count: usize = (0..graph.nodes().len())
+        .map(|index| graph.node(NodeId(index)).fanouts().len())
+        .sum();
+
+    writeln!(writer, "digraph \"module\" {{")?;
+    writeln!(writer, "    rankdir=LR;")?;
+    writeln!(writer, "    splines=true;")?;
+    writeln!(
+        writer,
+        "    node [shape=record style=\"filled,rounded\" fontname=\"Helvetica\" penwidth=1.5];"
+    )?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "    // nodes: {}, nets: {}, edges: {}, combinational_nodes: {}, max_depth: {}",
+        metrics.node_count,
+        metrics.net_count,
+        edge_count,
+        metrics.combinational_node_count(),
+        metrics.max_depth,
+    )?;
+    writeln!(
+        writer,
+        "    // depth_histogram: {:?}",
+        metrics.depth_histogram
+    )?;
+
+    if nodes_by_level.iter().any(|nodes| !nodes.is_empty()) {
+        writeln!(writer)?;
+        let mut first_cluster = true;
+        for (level, nodes) in nodes_by_level.iter().enumerate() {
+            if nodes.is_empty() {
+                continue;
+            }
+            if !first_cluster {
+                writeln!(writer)?;
+            }
+            first_cluster = false;
+            writeln!(writer, "    subgraph cluster_level_{level} {{")?;
+            writeln!(writer, "        label = \"Level {level}\";")?;
+            writeln!(writer, "        color = \"#cccccc\";")?;
+            writeln!(writer, "        style = \"rounded\";")?;
+            for &node_id in nodes {
+                let level = level_by_node[node_id.index()];
+                write_node_line(writer, "        ", &graph, node_id, level, options)?;
+            }
+            writeln!(writer, "    }}")?;
+        }
+    }
+
+    if !sequential_nodes.is_empty() {
+        writeln!(writer)?;
+        for node_id in sequential_nodes {
+            write_node_line(
+                writer,
+                "    ",
+                &graph,
+                node_id,
+                level_by_node[node_id.index()],
+                options,
+            )?;
+        }
+    }
+
+    if edge_count > 0 {
+        writeln!(writer)?;
+        for src_index in 0..graph.nodes().len() {
+            let src_id = NodeId(src_index);
+            for &dst_id in graph.node(src_id).fanouts() {
+                writeln!(
+                    writer,
+                    "    \"{}\" -> \"{}\";",
+                    escape_dot(graph.node(src_id).name()),
+                    escape_dot(graph.node(dst_id).name())
+                )?;
+            }
+        }
+    }
+
+    writeln!(writer, "}}")?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_node_line<W: Write>(
+    writer: &mut W,
+    indent: &str,
+    graph: &ModuleGraph,
+    node_id: NodeId,
+    level: Option<usize>,
+    options: &DotExportOptions,
+) -> std::io::Result<()> {
+    let node = graph.node(node_id);
+    let mut label_lines = vec![
+        node.name().to_string(),
+        node_op_label(node.op()).to_string(),
+    ];
+    if options.show_ids {
+        label_lines.push(format!("#{}", node_id.index()));
+    }
+    if options.show_levels {
+        let level_text = match level {
+            Some(level) => format!("L{level}"),
+            None => "L-".to_string(),
+        };
+        label_lines.push(level_text);
+    }
+
+    let label = label_lines
+        .into_iter()
+        .map(|line| escape_dot(&line))
+        .collect::<Vec<_>>()
+        .join("\\n");
+    let color = node_color(node.op());
+
+    writeln!(
+        writer,
+        "{indent}\"{}\" [label=\"{label}\" fillcolor=\"{color}\"];",
+        escape_dot(node.name())
+    )
+}
+
+fn node_op_label(op: &NodeOp) -> &'static str {
+    match op {
+        NodeOp::And => "AND",
+        NodeOp::Or => "OR",
+        NodeOp::Xor => "XOR",
+        NodeOp::Xnor => "XNOR",
+        NodeOp::Not => "NOT",
+        NodeOp::Mux => "MUX",
+        NodeOp::Add => "ADD",
+        NodeOp::Sub => "SUB",
+        NodeOp::Slice => "SLICE",
+        NodeOp::Cat => "CAT",
+        NodeOp::Const => "CONST",
+        NodeOp::Dff => "DFF",
+        NodeOp::Latch => "LATCH",
+    }
+}
+
+fn node_color(op: &NodeOp) -> &'static str {
+    match op {
+        NodeOp::And => "#8dd3c7",
+        NodeOp::Or => "#ffffb3",
+        NodeOp::Xor => "#bebada",
+        NodeOp::Xnor => "#80b1d3",
+        NodeOp::Not => "#fdb462",
+        NodeOp::Mux => "#b3de69",
+        NodeOp::Add => "#fccde5",
+        NodeOp::Sub => "#d9d9d9",
+        NodeOp::Slice => "#bc80bd",
+        NodeOp::Cat => "#ccebc5",
+        NodeOp::Const => "#ffed6f",
+        NodeOp::Dff => "#fb8072",
+        NodeOp::Latch => "#fbb4ae",
+    }
+}
+
+fn escape_dot(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,6 +751,17 @@ mod tests {
         let nir = v2m_formats::load_nir(&path).expect("load nir example");
         let module = nir.modules.get(nir.top.as_str()).expect("top module");
         ModuleGraph::from_module(module).expect("build graph")
+    }
+
+    fn module_from_example(name: &str) -> NirModule {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/nir")
+            .join(format!("{name}.json"));
+        let nir = v2m_formats::load_nir(&path).expect("load nir example");
+        nir.modules
+            .get(nir.top.as_str())
+            .expect("top module")
+            .clone()
     }
 
     fn net_bit(net: &str, lsb: u32, msb: u32) -> BitRef {
@@ -998,5 +1254,143 @@ mod tests {
         assert_eq!(metrics.max_depth, 2);
         assert_eq!(metrics.combinational_node_count(), 7);
         assert_eq!(metrics.depth_histogram, vec![4, 2, 1]);
+    }
+
+    #[test]
+    fn dot_export_full_adder_smoke() {
+        let module = module_from_example("full_adder");
+        let mut buffer = Vec::new();
+        let options = DotExportOptions {
+            show_ids: true,
+            show_levels: true,
+        };
+        write_dot_to_writer(&module, &mut buffer, &options).expect("dot export");
+        let dot = String::from_utf8(buffer).expect("utf8");
+
+        let graph = ModuleGraph::from_module(&module).expect("build graph");
+        let order = graph
+            .combinational_topological_order()
+            .expect("topological order");
+        let depths = graph.compute_depth(&order);
+        let mut histogram = Vec::new();
+        for &(_, level) in &depths {
+            if histogram.len() <= level {
+                histogram.resize(level + 1, 0);
+            }
+            histogram[level] += 1;
+        }
+        let max_depth = depths.iter().map(|&(_, level)| level).max().unwrap_or(0);
+        let node_count = graph.nodes().len();
+        let net_count = graph.nets().len();
+        let edge_count: usize = (0..graph.nodes().len())
+            .map(|index| graph.node(NodeId(index)).fanouts().len())
+            .sum();
+        let combinational_count = depths.len();
+
+        let summary_line = format!(
+            "// nodes: {node_count}, nets: {net_count}, edges: {edge_count}, combinational_nodes: {combinational_count}, max_depth: {max_depth}"
+        );
+        assert!(
+            dot.contains(&summary_line),
+            "summary line missing: {summary_line}\n{dot}"
+        );
+
+        let histogram_line = format!("// depth_histogram: {:?}", histogram);
+        assert!(
+            dot.contains(&histogram_line),
+            "histogram line missing: {histogram_line}\n{dot}"
+        );
+
+        assert!(dot.contains("subgraph cluster_level_0"));
+        assert!(dot.contains("subgraph cluster_level_1"));
+        assert!(dot.contains("subgraph cluster_level_2"));
+        assert!(dot.contains("\\n#"));
+        assert!(dot.contains("\\nL0"));
+
+        let line_count = dot.lines().count();
+        assert_eq!(line_count, 36);
+    }
+
+    #[test]
+    fn dot_export_respects_show_flags() {
+        let module = module_from_example("full_adder");
+
+        let mut buffer = Vec::new();
+        let options = DotExportOptions::default();
+        write_dot_to_writer(&module, &mut buffer, &options).expect("dot export");
+        let baseline = String::from_utf8(buffer).expect("utf8");
+        assert!(!baseline.contains("\\n#"));
+        assert!(!baseline.contains("\\nL"));
+
+        let mut buffer = Vec::new();
+        let options = DotExportOptions {
+            show_ids: false,
+            show_levels: true,
+        };
+        write_dot_to_writer(&module, &mut buffer, &options).expect("dot export");
+        let with_levels = String::from_utf8(buffer).expect("utf8");
+        assert!(!with_levels.contains("\\n#"));
+        assert!(with_levels.contains("\\nL0"));
+    }
+
+    #[test]
+    fn dot_export_marks_sequential_nodes() {
+        let mut nets = BTreeMap::new();
+        for (name, bits) in [("clk", 1), ("rst", 1), ("notq", 1), ("q", 1)] {
+            nets.insert(name.to_string(), NirNet { bits, attrs: None });
+        }
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "inv".to_string(),
+            NirNode {
+                uid: "inv".to_string(),
+                op: NodeOp::Not,
+                width: 1,
+                pin_map: BTreeMap::from([
+                    ("A".to_string(), net_bit("q", 0, 0)),
+                    ("Y".to_string(), net_bit("notq", 0, 0)),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+        nodes.insert(
+            "reg".to_string(),
+            NirNode {
+                uid: "reg".to_string(),
+                op: NodeOp::Dff,
+                width: 1,
+                pin_map: BTreeMap::from([
+                    ("D".to_string(), net_bit("notq", 0, 0)),
+                    ("Q".to_string(), net_bit("q", 0, 0)),
+                    ("CLK".to_string(), net_bit("clk", 0, 0)),
+                    ("RST".to_string(), net_bit("rst", 0, 0)),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+
+        let module = NirModule {
+            ports: BTreeMap::new(),
+            nets,
+            nodes,
+        };
+
+        let mut buffer = Vec::new();
+        let options = DotExportOptions {
+            show_ids: false,
+            show_levels: true,
+        };
+        write_dot_to_writer(&module, &mut buffer, &options).expect("dot export");
+        let dot = String::from_utf8(buffer).expect("utf8");
+
+        assert!(dot.contains("subgraph cluster_level_0"));
+        assert!(dot.contains("reg\\nDFF\\nL-"));
+        assert!(dot.contains("edges: 0"));
+
+        let line_count = dot.lines().count();
+        assert_eq!(line_count, 17);
     }
 }
