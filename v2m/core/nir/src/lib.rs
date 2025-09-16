@@ -2,6 +2,10 @@ use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::fmt;
 
+mod strash;
+
+pub use strash::{Literal, ParamMap, StrashKind, StrashNode, StrashNodeId, StructuralHasher};
+
 use v2m_formats::nir::{Module, NodeOp};
 use v2m_formats::{resolve_bitref, BitRef, ResolvedBit};
 
