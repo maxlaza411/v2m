@@ -433,10 +433,20 @@ struct BinaryKernel {
 }
 
 #[derive(Clone, Debug)]
+struct MuxKernel {
+    input_a: PackedIndex,
+    input_b: PackedIndex,
+    select: PackedIndex,
+    output: PackedIndex,
+    select_masks: Vec<u64>,
+}
+
+#[derive(Clone, Debug)]
 enum NodeKernel {
     Const(ConstKernel),
     Not(UnaryKernel),
     And(BinaryKernel),
+    Mux(MuxKernel),
 }
 
 fn bitref_full_net<'a>(bitref: &'a BitRef, expected_width: u32) -> Option<&'a str> {
@@ -871,6 +881,15 @@ mod tests {
         })
     }
 
+    fn net_bus(name: &str, width: u32) -> BitRef {
+        assert!(width > 0);
+        BitRef::Net(BitRefNet {
+            net: name.to_string(),
+            lsb: 0,
+            msb: width - 1,
+        })
+    }
+
     fn build_nir(module: NirModule) -> Nir {
         Nir {
             v: "nir-1.1".to_string(),
@@ -1092,6 +1111,293 @@ mod tests {
         let outputs = eval.get_outputs();
         let value = outputs.lane(output_index, 0)[0];
         assert_eq!(value, 0xFFFF_0000_FFFF_0000u64 & 0x0F0F_0F0F_0F0F_0F0Fu64);
+    }
+
+    #[test]
+    fn comb_eval_mux_selects_inputs() {
+        let data_width = 5u32;
+
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "a".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: data_width,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "b".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: data_width,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "sel".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: 1,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "y".to_string(),
+            NirPort {
+                dir: PortDirection::Output,
+                bits: data_width,
+                attrs: None,
+            },
+        );
+
+        let mut nets = BTreeMap::new();
+        nets.insert(
+            "a".to_string(),
+            NirNet {
+                bits: data_width,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "b".to_string(),
+            NirNet {
+                bits: data_width,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "sel".to_string(),
+            NirNet {
+                bits: 1,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "y".to_string(),
+            NirNet {
+                bits: data_width,
+                attrs: None,
+            },
+        );
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "mux0".to_string(),
+            NirNode {
+                uid: "mux0".to_string(),
+                op: NodeOp::Mux,
+                width: data_width,
+                pin_map: BTreeMap::from([
+                    ("A".to_string(), net_bus("a", data_width)),
+                    ("B".to_string(), net_bus("b", data_width)),
+                    ("S".to_string(), net_bit("sel")),
+                    ("Y".to_string(), net_bus("y", data_width)),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+
+        let module = NirModule { ports, nets, nodes };
+        let nir = build_nir(module);
+
+        let num_vectors = 80;
+        let mut eval =
+            Evaluator::new(&nir, num_vectors, SimOptions::default()).expect("create evaluator");
+
+        let mut rng = StdRng::seed_from_u64(0xDEADBEEFu64);
+
+        let mut inputs = Packed::new(num_vectors);
+        let width = data_width as usize;
+        let input_a = inputs.allocate(width);
+        let input_b = inputs.allocate(width);
+        let select_index = inputs.allocate(1);
+
+        let words_per_lane = inputs.words_per_lane();
+
+        for lane in 0..width {
+            let lane_words = inputs.lane_mut(input_a, lane);
+            for word_idx in 0..words_per_lane {
+                lane_words[word_idx] = rng.next_u64();
+            }
+        }
+
+        for lane in 0..width {
+            let lane_words = inputs.lane_mut(input_b, lane);
+            for word_idx in 0..words_per_lane {
+                lane_words[word_idx] = rng.next_u64();
+            }
+        }
+
+        {
+            let select_words = inputs.lane_mut(select_index, 0);
+            for word_idx in 0..words_per_lane {
+                let mask = mask_for_word(word_idx, words_per_lane, num_vectors);
+                select_words[word_idx] = rng.next_u64() & mask;
+            }
+        }
+
+        eval.set_inputs(&inputs).expect("set inputs");
+        eval.comb_eval().expect("comb eval");
+
+        let outputs = eval.get_outputs();
+        let output_index = *eval.output_ports.get("y").expect("output port");
+
+        let select_words = inputs.lane(select_index, 0);
+        for lane in 0..width {
+            let a_lane = inputs.lane(input_a, lane);
+            let b_lane = inputs.lane(input_b, lane);
+            let expected: Vec<u64> = (0..words_per_lane)
+                .map(|word_idx| {
+                    let mask = mask_for_word(word_idx, words_per_lane, num_vectors);
+                    let sel = select_words[word_idx] & mask;
+                    let not_sel = (!sel) & mask;
+                    (sel & b_lane[word_idx]) | (not_sel & a_lane[word_idx])
+                })
+                .collect();
+            assert_eq!(outputs.lane(output_index, lane), expected.as_slice());
+        }
+    }
+
+    #[test]
+    fn comb_eval_mux_lane_boundaries() {
+        let data_width = 2u32;
+
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "a".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: data_width,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "b".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: data_width,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "sel".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: 1,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "y".to_string(),
+            NirPort {
+                dir: PortDirection::Output,
+                bits: data_width,
+                attrs: None,
+            },
+        );
+
+        let mut nets = BTreeMap::new();
+        nets.insert(
+            "a".to_string(),
+            NirNet {
+                bits: data_width,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "b".to_string(),
+            NirNet {
+                bits: data_width,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "sel".to_string(),
+            NirNet {
+                bits: 1,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "y".to_string(),
+            NirNet {
+                bits: data_width,
+                attrs: None,
+            },
+        );
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "mux0".to_string(),
+            NirNode {
+                uid: "mux0".to_string(),
+                op: NodeOp::Mux,
+                width: data_width,
+                pin_map: BTreeMap::from([
+                    ("A".to_string(), net_bus("a", data_width)),
+                    ("B".to_string(), net_bus("b", data_width)),
+                    ("S".to_string(), net_bit("sel")),
+                    ("Y".to_string(), net_bus("y", data_width)),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+
+        let module = NirModule { ports, nets, nodes };
+        let nir = build_nir(module);
+
+        let num_vectors = 96;
+        let mut eval =
+            Evaluator::new(&nir, num_vectors, SimOptions::default()).expect("create evaluator");
+
+        let mut inputs = Packed::new(num_vectors);
+        let width = data_width as usize;
+        let input_a = inputs.allocate(width);
+        let input_b = inputs.allocate(width);
+        let select_index = inputs.allocate(1);
+
+        let words_per_lane = inputs.words_per_lane();
+        assert_eq!(words_per_lane, 2);
+
+        let mask0 = mask_for_word(0, words_per_lane, num_vectors);
+        let mask1 = mask_for_word(1, words_per_lane, num_vectors);
+
+        {
+            let select_words = inputs.lane_mut(select_index, 0);
+            select_words[0] = 0;
+            select_words[1] = mask1;
+        }
+
+        inputs
+            .lane_mut(input_a, 0)
+            .copy_from_slice(&[0x1234_5678_9ABC_DEF0u64, 0x0F0F_0F0F_0F0F_0F0Fu64]);
+        inputs
+            .lane_mut(input_a, 1)
+            .copy_from_slice(&[0xAAAA_AAAA_AAAA_AAAAu64, 0x5555_5555_5555_5555u64]);
+
+        inputs
+            .lane_mut(input_b, 0)
+            .copy_from_slice(&[0x1111_1111_1111_1111u64, 0xFFFF_FFFF_FFFF_FFFFu64]);
+        inputs
+            .lane_mut(input_b, 1)
+            .copy_from_slice(&[0x2222_2222_2222_2222u64, 0x3333_3333_3333_3333u64]);
+
+        eval.set_inputs(&inputs).expect("set inputs");
+        eval.comb_eval().expect("comb eval");
+
+        let outputs = eval.get_outputs();
+        let output_index = *eval.output_ports.get("y").expect("output port");
+
+        let lane0 = outputs.lane(output_index, 0);
+        assert_eq!(lane0[0], inputs.lane(input_a, 0)[0] & mask0);
+        assert_eq!(lane0[1], inputs.lane(input_b, 0)[1] & mask1);
+
+        let lane1 = outputs.lane(output_index, 1);
+        assert_eq!(lane1[0], inputs.lane(input_a, 1)[0] & mask0);
+        assert_eq!(lane1[1], inputs.lane(input_b, 1)[1] & mask1);
     }
 }
 
@@ -1416,6 +1722,7 @@ impl<'nir> Evaluator<'nir> {
             NodeKernel::Const(kernel) => self.run_const(kernel),
             NodeKernel::Not(kernel) => self.run_not(kernel),
             NodeKernel::And(kernel) => self.run_and(kernel),
+            NodeKernel::Mux(kernel) => self.run_mux(kernel),
         }
     }
 
@@ -1455,6 +1762,29 @@ impl<'nir> Evaluator<'nir> {
         }
     }
 
+    fn run_mux(&mut self, kernel: &MuxKernel) {
+        let words_per_lane = self.nets.words_per_lane();
+        if words_per_lane == 0 {
+            return;
+        }
+
+        debug_assert_eq!(kernel.select.lanes(), 1);
+        debug_assert_eq!(kernel.select_masks.len(), words_per_lane);
+
+        let input_a = self.nets.slice(kernel.input_a).to_vec();
+        let input_b = self.nets.slice(kernel.input_b).to_vec();
+        let select_words = self.nets.slice(kernel.select).to_vec();
+        debug_assert_eq!(select_words.len(), words_per_lane * kernel.select.lanes());
+        let output_slice = self.nets.slice_mut(kernel.output);
+        for (index, word) in output_slice.iter_mut().enumerate() {
+            let lane_word = index % words_per_lane;
+            let mask = kernel.select_masks[lane_word];
+            let select = select_words[lane_word] & mask;
+            let not_select = (!select) & mask;
+            *word = (select & input_b[index]) | (not_select & input_a[index]);
+        }
+    }
+
     fn build_comb_kernels(
         module: &'nir Module,
         graph: &ModuleGraph,
@@ -1480,6 +1810,10 @@ impl<'nir> Evaluator<'nir> {
                 }
                 NodeOp::Not => Self::build_not_kernel(node, net_indices).map(NodeKernel::Not),
                 NodeOp::And => Self::build_and_kernel(node, net_indices).map(NodeKernel::And),
+                NodeOp::Mux => {
+                    Self::build_mux_kernel(node, net_indices, words_per_lane, num_vectors)
+                        .map(NodeKernel::Mux)
+                }
                 _ => None,
             };
 
@@ -1584,6 +1918,56 @@ impl<'nir> Evaluator<'nir> {
             input_a,
             input_b,
             output,
+        })
+    }
+
+    fn build_mux_kernel(
+        node: &v2m_formats::nir::Node,
+        net_indices: &HashMap<String, PackedIndex>,
+        words_per_lane: usize,
+        num_vectors: usize,
+    ) -> Option<MuxKernel> {
+        let input_a_ref = node.pin_map.get("A")?;
+        let input_b_ref = node.pin_map.get("B")?;
+        let select_ref = node.pin_map.get("S")?;
+        let output_ref = node.pin_map.get("Y")?;
+
+        let input_a_net = bitref_full_net(input_a_ref, node.width)?;
+        let input_b_net = bitref_full_net(input_b_ref, node.width)?;
+        let select_net = bitref_full_net(select_ref, 1)?;
+        let output_net = bitref_full_net(output_ref, node.width)?;
+
+        let input_a = *net_indices
+            .get(input_a_net)
+            .expect("MUX A input net must be allocated");
+        let input_b = *net_indices
+            .get(input_b_net)
+            .expect("MUX B input net must be allocated");
+        let select = *net_indices
+            .get(select_net)
+            .expect("MUX select net must be allocated");
+        let output = *net_indices
+            .get(output_net)
+            .expect("MUX output net must be allocated");
+
+        if select.lanes() != 1 {
+            return None;
+        }
+
+        let select_masks = if words_per_lane == 0 {
+            Vec::new()
+        } else {
+            (0..words_per_lane)
+                .map(|word| mask_for_word(word, words_per_lane, num_vectors))
+                .collect()
+        };
+
+        Some(MuxKernel {
+            input_a,
+            input_b,
+            select,
+            output,
+            select_masks,
         })
     }
 
