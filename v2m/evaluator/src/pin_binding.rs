@@ -1,4 +1,5 @@
 use std::cmp::min;
+use std::collections::HashMap;
 
 use thiserror::Error;
 use v2m_formats::nir::{BitRef, Module};
@@ -20,10 +21,12 @@ pub(crate) struct ConstValue {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ConstPool {
     values: Vec<ConstValue>,
+    lookup: HashMap<ConstKey, ConstId>,
 }
 
 impl ConstPool {
     pub(crate) fn allocate(&mut self, bits: &[bool]) -> ConstId {
+        let width = bits.len() as u32;
         let lanes = (bits.len() + (LANE_BITS as usize - 1)) / LANE_BITS as usize;
         let mut words = vec![0u64; lanes];
         for (index, &bit) in bits.iter().enumerate() {
@@ -33,11 +36,19 @@ impl ConstPool {
                 words[lane] |= 1u64 << offset;
             }
         }
+
+        let key = ConstKey {
+            width,
+            words: words.clone(),
+        };
+
+        if let Some(&id) = self.lookup.get(&key) {
+            return id;
+        }
+
         let id = ConstId(self.values.len());
-        self.values.push(ConstValue {
-            words,
-            width: bits.len() as u32,
-        });
+        self.lookup.insert(key, id);
+        self.values.push(ConstValue { words, width });
         id
     }
 
@@ -60,6 +71,12 @@ impl ConstPool {
     pub(crate) fn values(&self) -> &[ConstValue] {
         &self.values
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ConstKey {
+    width: u32,
+    words: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -343,6 +360,33 @@ mod tests {
         assert_eq!(value.width, 8);
         assert_eq!(value.words.len(), 1);
         assert_eq!(value.words[0], 0b10101100);
+    }
+
+    #[test]
+    fn reuses_existing_constant_values() {
+        let module = module_with_nets(&[]);
+        let graph = ModuleGraph::from_module(&module).expect("build graph");
+        let mut const_pool = ConstPool::default();
+        let bitref = BitRef::Const(BitRefConst {
+            value: "0b1100".to_string(),
+            width: 4,
+        });
+
+        let first = bind_bitref(&module, &graph, &bitref, &mut const_pool).expect("bind const");
+        let second = bind_bitref(&module, &graph, &bitref, &mut const_pool).expect("bind const");
+
+        assert_eq!(const_pool.len(), 1);
+
+        let first_id = match first.descriptors()[0].source {
+            SignalId::Const(id) => id,
+            other => panic!("expected const descriptor, got {other:?}"),
+        };
+        let second_id = match second.descriptors()[0].source {
+            SignalId::Const(id) => id,
+            other => panic!("expected const descriptor, got {other:?}"),
+        };
+
+        assert_eq!(first_id, second_id);
     }
 
     #[test]
