@@ -8,3 +8,6 @@ license = "MIT"
 v2m-formats = { path = "../core/formats" }
 v2m-nir = { path = "../core/nir" }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
