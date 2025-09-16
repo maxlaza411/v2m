@@ -1,6 +1,5 @@
 ---
 source: core/formats/tests/roundtrip.rs
-assertion_line: 35
 expression: value
 ---
 {

@@ -1,0 +1,72 @@
+{
+  "v": "nir-1.1",
+  "design": "counter",
+  "top": "Counter",
+  "attrs": {
+    "description": "4-bit counter with enable and synchronous reset"
+  },
+  "modules": {
+    "Counter": {
+      "ports": {
+        "clk": { "dir": "input", "bits": 1 },
+        "reset": { "dir": "input", "bits": 1 },
+        "en": { "dir": "input", "bits": 1 },
+        "value": { "dir": "output", "bits": 4 }
+      },
+      "nets": {
+        "clk": { "bits": 1 },
+        "reset": { "bits": 1 },
+        "en": { "bits": 1 },
+        "value": { "bits": 4 },
+        "incremented": { "bits": 4 },
+        "enabled_next": { "bits": 4 },
+        "next": { "bits": 4 }
+      },
+      "nodes": {
+        "add_inc": {
+          "uid": "add_inc",
+          "op": "ADD",
+          "width": 4,
+          "pin_map": {
+            "A": { "net": "value", "lsb": 0, "msb": 3 },
+            "B": { "const": "0001", "width": 4 },
+            "Y": { "net": "incremented", "lsb": 0, "msb": 3 }
+          }
+        },
+        "mux_enable": {
+          "uid": "mux_enable",
+          "op": "MUX",
+          "width": 4,
+          "pin_map": {
+            "A": { "net": "value", "lsb": 0, "msb": 3 },
+            "B": { "net": "incremented", "lsb": 0, "msb": 3 },
+            "S": { "concat": [ { "net": "en", "lsb": 0, "msb": 0 } ] },
+            "Y": { "net": "enabled_next", "lsb": 0, "msb": 3 }
+          }
+        },
+        "mux_reset": {
+          "uid": "mux_reset",
+          "op": "MUX",
+          "width": 4,
+          "pin_map": {
+            "A": { "net": "enabled_next", "lsb": 0, "msb": 3 },
+            "B": { "const": "0000", "width": 4 },
+            "S": { "concat": [ { "net": "reset", "lsb": 0, "msb": 0 } ] },
+            "Y": { "net": "next", "lsb": 0, "msb": 3 }
+          }
+        },
+        "state_reg": {
+          "uid": "state_reg",
+          "op": "DFF",
+          "width": 4,
+          "pin_map": {
+            "D": { "net": "next", "lsb": 0, "msb": 3 },
+            "Q": { "net": "value", "lsb": 0, "msb": 3 },
+            "CLK": { "net": "clk", "lsb": 0, "msb": 0 },
+            "RST": { "net": "reset", "lsb": 0, "msb": 0 }
+          }
+        }
+      }
+    }
+  }
+}

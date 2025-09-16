@@ -1,0 +1,78 @@
+{
+  "v": "nir-1.1",
+  "design": "full_adder",
+  "top": "FullAdder",
+  "modules": {
+    "FullAdder": {
+      "ports": {
+        "a": { "dir": "input", "bits": 1 },
+        "b": { "dir": "input", "bits": 1 },
+        "cin": { "dir": "input", "bits": 1 },
+        "sum": { "dir": "output", "bits": 1 },
+        "cout": { "dir": "output", "bits": 1 }
+      },
+      "nets": {
+        "a": { "bits": 1 },
+        "b": { "bits": 1 },
+        "cin": { "bits": 1 },
+        "sum": { "bits": 1 },
+        "cout": { "bits": 1 },
+        "sum_ab": { "bits": 1 },
+        "carry_ab": { "bits": 1 },
+        "carry_cin": { "bits": 1 }
+      },
+      "nodes": {
+        "xor_ab": {
+          "uid": "xor_ab",
+          "op": "XOR",
+          "width": 1,
+          "pin_map": {
+            "A": { "net": "a", "lsb": 0, "msb": 0 },
+            "B": { "net": "b", "lsb": 0, "msb": 0 },
+            "Y": { "net": "sum_ab", "lsb": 0, "msb": 0 }
+          }
+        },
+        "xor_sum": {
+          "uid": "xor_sum",
+          "op": "XOR",
+          "width": 1,
+          "pin_map": {
+            "A": { "net": "sum_ab", "lsb": 0, "msb": 0 },
+            "B": { "net": "cin", "lsb": 0, "msb": 0 },
+            "Y": { "net": "sum", "lsb": 0, "msb": 0 }
+          }
+        },
+        "and_ab": {
+          "uid": "and_ab",
+          "op": "AND",
+          "width": 1,
+          "pin_map": {
+            "A": { "net": "a", "lsb": 0, "msb": 0 },
+            "B": { "net": "b", "lsb": 0, "msb": 0 },
+            "Y": { "net": "carry_ab", "lsb": 0, "msb": 0 }
+          }
+        },
+        "and_cin": {
+          "uid": "and_cin",
+          "op": "AND",
+          "width": 1,
+          "pin_map": {
+            "A": { "net": "sum_ab", "lsb": 0, "msb": 0 },
+            "B": { "net": "cin", "lsb": 0, "msb": 0 },
+            "Y": { "net": "carry_cin", "lsb": 0, "msb": 0 }
+          }
+        },
+        "or_carry": {
+          "uid": "or_carry",
+          "op": "OR",
+          "width": 1,
+          "pin_map": {
+            "A": { "net": "carry_ab", "lsb": 0, "msb": 0 },
+            "B": { "net": "carry_cin", "lsb": 0, "msb": 0 },
+            "Y": { "net": "cout", "lsb": 0, "msb": 0 }
+          }
+        }
+      }
+    }
+  }
+}
