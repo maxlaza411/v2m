@@ -344,10 +344,11 @@ fn resolve_decimal_constant(
         });
     }
 
-    let value = BigUint::parse_bytes(digits.as_bytes(), 10).ok_or_else(|| Error::InvalidConstant {
-        literal: literal.to_string(),
-        reason: "failed to parse decimal literal".to_string(),
-    })?;
+    let value =
+        BigUint::parse_bytes(digits.as_bytes(), 10).ok_or_else(|| Error::InvalidConstant {
+            literal: literal.to_string(),
+            reason: "failed to parse decimal literal".to_string(),
+        })?;
 
     let binary = value.to_str_radix(2);
     if binary.len() != width {
