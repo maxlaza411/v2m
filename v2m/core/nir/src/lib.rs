@@ -2,8 +2,10 @@ use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::fmt;
 
+mod lint;
 mod strash;
 
+pub use lint::{lint_module, lint_nir, Driver, LintError};
 pub use strash::{Literal, ParamMap, StrashKind, StrashNode, StrashNodeId, StructuralHasher};
 
 use v2m_formats::nir::{Module, NodeOp};
