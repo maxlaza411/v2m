@@ -1,0 +1,12 @@
+[package]
+name = "v2m-nir"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+v2m-formats = { path = "../formats" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+v2m-formats = { path = "../formats" }
