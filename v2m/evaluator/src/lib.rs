@@ -6,6 +6,26 @@ use v2m_nir::{BuildError as GraphBuildError, EvalOrderError, ModuleGraph, NodeId
 
 const WORD_BITS: usize = 64;
 
+#[inline]
+fn div_ceil(value: usize, divisor: usize) -> usize {
+    debug_assert!(divisor > 0);
+    if value == 0 {
+        0
+    } else {
+        1 + (value - 1) / divisor
+    }
+}
+
+#[inline]
+fn lanes_for_width(width_bits: usize) -> usize {
+    div_ceil(width_bits, WORD_BITS)
+}
+
+#[inline]
+fn words_for_vectors(num_vectors: usize) -> usize {
+    div_ceil(num_vectors, WORD_BITS)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SimOptions {
     pub allow_x: bool,
@@ -76,22 +96,24 @@ pub struct Evaluator<'nir> {
 
 impl Packed {
     pub fn new(num_vectors: usize) -> Self {
-        let words_per_lane = (num_vectors + (WORD_BITS - 1)) / WORD_BITS;
         Self {
             num_vectors,
-            words_per_lane,
+            words_per_lane: words_for_vectors(num_vectors),
             storage: Vec::new(),
         }
     }
 
+    #[inline]
     pub fn num_vectors(&self) -> usize {
         self.num_vectors
     }
 
+    #[inline]
     pub fn words_per_lane(&self) -> usize {
         self.words_per_lane
     }
 
+    #[inline]
     pub fn total_lanes(&self) -> usize {
         if self.words_per_lane == 0 {
             0
@@ -101,7 +123,7 @@ impl Packed {
     }
 
     pub fn allocate(&mut self, width_bits: usize) -> PackedIndex {
-        let lanes = (width_bits + (WORD_BITS - 1)) / WORD_BITS;
+        let lanes = lanes_for_width(width_bits);
         let offset = self.storage.len();
         self.storage.resize(offset + lanes * self.words_per_lane, 0);
         PackedIndex { offset, lanes }
@@ -115,11 +137,31 @@ impl Packed {
         }
     }
 
+    #[inline]
+    fn lane_offset(&self, index: PackedIndex, lane: usize) -> usize {
+        debug_assert!(lane < index.lanes);
+        index.offset + lane * self.words_per_lane
+    }
+
+    pub fn lane(&self, index: PackedIndex, lane: usize) -> &[u64] {
+        let start = self.lane_offset(index, lane);
+        let end = start + self.words_per_lane;
+        &self.storage[start..end]
+    }
+
+    pub fn lane_mut(&mut self, index: PackedIndex, lane: usize) -> &mut [u64] {
+        let start = self.lane_offset(index, lane);
+        let end = start + self.words_per_lane;
+        &mut self.storage[start..end]
+    }
+
+    #[inline]
     pub fn slice(&self, index: PackedIndex) -> &[u64] {
         let end = index.offset + index.lanes * self.words_per_lane;
         &self.storage[index.offset..end]
     }
 
+    #[inline]
     pub fn slice_mut(&mut self, index: PackedIndex) -> &mut [u64] {
         let end = index.offset + index.lanes * self.words_per_lane;
         &mut self.storage[index.offset..end]
@@ -142,29 +184,126 @@ impl Packed {
 }
 
 impl PackedIndex {
+    #[inline]
     pub fn offset(&self) -> usize {
         self.offset
     }
 
+    #[inline]
     pub fn lanes(&self) -> usize {
         self.lanes
+    }
+
+    #[inline]
+    pub fn lane_offset(&self, lane: usize, words_per_lane: usize) -> usize {
+        debug_assert!(lane < self.lanes);
+        self.offset + lane * words_per_lane
+    }
+
+    #[inline]
+    pub fn word_offset(&self, lane: usize, word: usize, words_per_lane: usize) -> usize {
+        debug_assert!(words_per_lane > 0);
+        debug_assert!(word < words_per_lane);
+        self.lane_offset(lane, words_per_lane) + word
     }
 }
 
 impl PackedBitMask {
     pub fn new(num_vectors: usize) -> Self {
-        let word_count = (num_vectors + (WORD_BITS - 1)) / WORD_BITS;
         Self {
-            words: vec![0; word_count],
+            words: vec![0; words_for_vectors(num_vectors)],
         }
     }
 
+    #[inline]
     pub fn words(&self) -> &[u64] {
         &self.words
     }
 
+    #[inline]
     pub fn words_mut(&mut self) -> &mut [u64] {
         &mut self.words
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_lane_and_word_indexing() {
+        let mut packed = Packed::new(128);
+        assert_eq!(packed.words_per_lane(), 2);
+
+        let first = packed.allocate(96);
+        assert_eq!(first.offset(), 0);
+        assert_eq!(first.lanes(), 2);
+
+        let second = packed.allocate(32);
+        assert_eq!(second.lanes(), 1);
+        assert_eq!(
+            second.offset(),
+            first.offset() + first.lanes() * packed.words_per_lane()
+        );
+
+        for lane in 0..first.lanes() {
+            let lane_slice = packed.lane_mut(first, lane);
+            for word in 0..lane_slice.len() {
+                lane_slice[word] = ((lane as u64) << 16) | word as u64;
+            }
+        }
+
+        {
+            let lane_slice = packed.lane_mut(second, 0);
+            for word in 0..lane_slice.len() {
+                lane_slice[word] = 0xABCD_0000 | word as u64;
+            }
+        }
+
+        assert_eq!(packed.total_lanes(), first.lanes() + second.lanes());
+        assert_eq!(packed.lane(first, 0), &[0, 1]);
+        assert_eq!(packed.lane(first, 1), &[0x0001_0000, 0x0001_0001]);
+        assert_eq!(packed.slice(first), &[0, 1, 0x0001_0000, 0x0001_0001]);
+        assert_eq!(packed.slice(second), &[0xABCD_0000, 0xABCD_0001]);
+
+        let words_per_lane = packed.words_per_lane();
+        assert_eq!(first.lane_offset(1, words_per_lane), words_per_lane);
+        assert_eq!(first.word_offset(1, 1, words_per_lane), words_per_lane + 1);
+    }
+
+    #[test]
+    fn packed_handles_width_not_multiple_of_word() {
+        let mut packed = Packed::new(70);
+        assert_eq!(packed.words_per_lane(), 2);
+
+        let index = packed.allocate(65);
+        assert_eq!(index.lanes(), 2);
+        assert_eq!(packed.slice(index).len(), 4);
+
+        packed.lane_mut(index, 1)[1] = 0xFFFF_FFFF_FFFFu64;
+
+        assert_eq!(packed.lane(index, 1)[1], 0xFFFF_FFFF_FFFFu64);
+        assert_eq!(packed.slice(index)[3], 0xFFFF_FFFF_FFFFu64);
+        assert!(packed.slice(index)[0..3].iter().all(|&word| word == 0));
+    }
+
+    #[test]
+    fn bitmask_matches_vector_layout() {
+        let num_vectors = 130;
+        let mut mask = PackedBitMask::new(num_vectors);
+        assert_eq!(
+            mask.words().len(),
+            Packed::new(num_vectors).words_per_lane()
+        );
+
+        mask.words_mut()[0] = u64::MAX;
+        mask.words_mut()[2] = 0x55AAu64;
+
+        assert_eq!(mask.words()[0], u64::MAX);
+        assert_eq!(mask.words()[2], 0x55AAu64);
+
+        let empty_mask = PackedBitMask::new(0);
+        assert!(empty_mask.words().is_empty());
     }
 }
 
