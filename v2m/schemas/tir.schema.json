@@ -15,7 +15,36 @@
     }
   },
   "$defs": {
-    "BitRef": { "$ref": "https://v2m.dev/schemas/nir#/$defs/BitRef" },
+    "BitRef": {
+      "description": "Reference to bits of a net or a constant",
+      "oneOf": [
+        { "type": "object", "additionalProperties": false,
+          "required": ["net","lsb","msb"],
+          "properties": {
+            "net": { "type": "string" },
+            "lsb": { "type": "integer", "minimum": 0 },
+            "msb": { "type": "integer", "minimum": 0 }
+          }
+        },
+        { "type": "object", "additionalProperties": false,
+          "required": ["const","width"],
+          "properties": {
+            "const": { "type": "string", "pattern": "^(?:\\d+|0b[01_]+|0x[0-9A-Fa-f_]+)$" },
+            "width": { "type": "integer", "minimum": 1 }
+          }
+        },
+        { "type": "object", "additionalProperties": false,
+          "required": ["concat"],
+          "properties": {
+            "concat": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/BitRef" }
+            }
+          }
+        }
+      ]
+    },
 
     "instance": {
       "type": "object", "additionalProperties": false,

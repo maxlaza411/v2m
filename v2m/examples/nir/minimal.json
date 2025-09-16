@@ -1,0 +1,51 @@
+{
+  "v": "nir-1.1",
+  "design": "example",
+  "top": "Example",
+  "modules": {
+    "Example": {
+      "ports": {
+        "a": { "dir": "input", "bits": 1 },
+        "b": { "dir": "input", "bits": 1 },
+        "y": { "dir": "output", "bits": 1 }
+      },
+      "nets": {
+        "a": { "bits": 1 },
+        "b": { "bits": 1 },
+        "y": { "bits": 1 },
+        "n0": { "bits": 1 }
+      },
+      "nodes": {
+        "and0": {
+          "uid": "and0",
+          "op": "AND",
+          "width": 1,
+          "pin_map": {
+            "A": { "net": "a", "lsb": 0, "msb": 0 },
+            "B": { "net": "b", "lsb": 0, "msb": 0 },
+            "Y": { "net": "y", "lsb": 0, "msb": 0 }
+          }
+        },
+        "const0": {
+          "uid": "const0",
+          "op": "CONST",
+          "width": 1,
+          "pin_map": {
+            "Y": { "const": "1", "width": 1 }
+          }
+        },
+        "mux0": {
+          "uid": "mux0",
+          "op": "MUX",
+          "width": 1,
+          "pin_map": {
+            "A": { "net": "a", "lsb": 0, "msb": 0 },
+            "B": { "net": "b", "lsb": 0, "msb": 0 },
+            "S": { "concat": [ { "net": "n0", "lsb": 0, "msb": 0 } ] },
+            "Y": { "net": "y", "lsb": 0, "msb": 0 }
+          }
+        }
+      }
+    }
+  }
+}

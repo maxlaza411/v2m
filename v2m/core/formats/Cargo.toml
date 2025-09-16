@@ -1,0 +1,15 @@
+[package]
+name = "v2m-formats"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+jsonschema = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+walkdir = { workspace = true }

@@ -1,0 +1,39 @@
+{
+  "v": "tir-1.1",
+  "lib": "stdcells",
+  "top": "Example",
+  "modules": {
+    "Example": {
+      "ports": {
+        "a": { "dir": "input", "bits": 1 },
+        "b": { "dir": "input", "bits": 1 },
+        "y": { "dir": "output", "bits": 1 }
+      },
+      "nets": {
+        "a": { "bits": 1 },
+        "b": { "bits": 1 },
+        "y": { "bits": 1 },
+        "n0": { "bits": 1 }
+      },
+      "instances": {
+        "inst0": {
+          "uid": "inst0",
+          "cell": "AND2",
+          "connections": {
+            "A": { "net": "a", "lsb": 0, "msb": 0 },
+            "B": { "net": "b", "lsb": 0, "msb": 0 },
+            "Y": { "net": "n0", "lsb": 0, "msb": 0 }
+          }
+        },
+        "inst1": {
+          "uid": "inst1",
+          "cell": "BUF",
+          "connections": {
+            "A": { "net": "n0", "lsb": 0, "msb": 0 },
+            "Y": { "net": "y", "lsb": 0, "msb": 0 }
+          }
+        }
+      }
+    }
+  }
+}
