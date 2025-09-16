@@ -16,3 +16,4 @@ thiserror = "1"
 jsonschema = { version = "0.17", default-features = false, features = ["draft201909", "draft202012"] }
 insta = { version = "1", features = ["json"], default-features = false }
 walkdir = "2"
+num-bigint = "0.4"

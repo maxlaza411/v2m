@@ -12,7 +12,7 @@ pub mod tir;
 pub mod wir;
 
 pub use constraints::Constraints;
-pub use nir::{BitRef, Nir, load_nir, save_nir};
+pub use nir::{resolve_bitref, BitRef, Nir, ResolvedBit, ResolvedNetBit, load_nir, save_nir};
 pub use pir::Pir;
 pub use techlib::Techlib;
 pub use tir::Tir;
@@ -26,6 +26,25 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("schema validation failed:\n{0}")]
     Schema(String),
+    #[error("bitref references unknown net `{net}`")]
+    UnknownNet { net: String },
+    #[error("bitref slice {net}[{lsb}:{msb}] has lsb greater than msb")]
+    InvalidBitRange { net: String, lsb: u32, msb: u32 },
+    #[error("bitref slice {net}[{lsb}:{msb}] exceeds width {width}")]
+    BitRangeOutOfBounds {
+        net: String,
+        lsb: u32,
+        msb: u32,
+        width: u32,
+    },
+    #[error("invalid constant literal `{literal}`: {reason}")]
+    InvalidConstant { literal: String, reason: String },
+    #[error("constant literal `{literal}` width mismatch: expected {width} bits, got {actual}")]
+    ConstantWidthMismatch {
+        literal: String,
+        width: u32,
+        actual: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
