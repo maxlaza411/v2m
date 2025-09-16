@@ -1,0 +1,42 @@
+{
+  "$id": "https://v2m.dev/schemas/constraints#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "V2M Build Constraints",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v","timing","retime","routing","backend"],
+  "properties": {
+    "v": { "type": "string", "const": "constraints-1.1" },
+    "timing": {
+      "type": "object", "additionalProperties": false,
+      "required": ["clock_name","clock_period_ticks"],
+      "properties": {
+        "clock_name": { "type": "string", "default": "clk" },
+        "clock_period_ticks": { "type": "number", "minimum": 1 },
+        "uncertainty_ticks": { "type": "number", "minimum": 0, "default": 0 },
+        "max_fanout": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "reset": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name","polarity","kind"],
+      "properties": {
+        "name": { "type": "string" },
+        "polarity": { "enum": ["active_high","active_low"] },
+        "kind": { "enum": ["sync","async"] },
+        "init_zero": { "type": "boolean", "default": true }
+      }
+    },
+    "retime": { "type": "boolean" },
+    "routing": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "track_pitch": { "type": "integer", "minimum": 1 },
+        "via_cost": { "type": "number", "minimum": 0 },
+        "turn_cost": { "type": "number", "minimum": 0 },
+        "buffer_every": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "backend": { "enum": ["redstone","datapack"] }
+  }
+}

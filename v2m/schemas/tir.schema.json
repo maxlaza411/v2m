@@ -1,0 +1,58 @@
+{
+  "$id": "https://v2m.dev/schemas/tir#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "V2M TIR",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v","lib","top","modules"],
+  "properties": {
+    "v": { "type": "string", "const": "tir-1.1" },
+    "lib": { "type": "string" },
+    "top": { "type": "string" },
+    "modules": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/module" }
+    }
+  },
+  "$defs": {
+    "BitRef": { "$ref": "https://v2m.dev/schemas/nir#/$defs/BitRef" },
+
+    "instance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["uid","cell","connections"],
+      "properties": {
+        "uid": { "type": "string" },
+        "cell": { "type": "string" },
+        "params": { "type": "object" },
+        "connections": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/BitRef" }
+        }
+      }
+    },
+
+    "net": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bits"],
+      "properties": {
+        "bits": { "type": "integer", "minimum": 1 },
+        "attrs": { "type": "object" }
+      }
+    },
+
+    "module": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ports","nets","instances"],
+      "properties": {
+        "ports": { "type": "object", "additionalProperties": {
+          "type": "object", "additionalProperties": false,
+          "required": ["dir","bits"], "properties": {
+            "dir":{"enum":["input","output","inout"]}, "bits":{"type":"integer","minimum":1}
+          }
+        }},
+        "nets": { "type": "object", "additionalProperties": { "$ref": "#/$defs/net" } },
+        "instances": { "type": "object", "additionalProperties": { "$ref": "#/$defs/instance" } }
+      }
+    }
+  }
+}

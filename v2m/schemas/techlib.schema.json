@@ -1,0 +1,122 @@
+{
+  "$id": "https://v2m.dev/schemas/techlib#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "V2M Technology Library",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v","name","minecraft","cells"],
+  "properties": {
+    "v": { "type": "string", "const": "techlib-1.1" },
+    "name": { "type": "string" },
+    "minecraft": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version","coords","orientations"],
+      "properties": {
+        "version": { "type": "string" },
+        "edition": { "enum": ["java","bedrock"], "default": "java" },
+        "coords": { "enum": ["x-east_y-up_z-south","x-east_y-up_z-north"] },
+        "orientations": { "type": "array", "items": { "enum": ["north","south","east","west","up","down"] } }
+      }
+    },
+    "physics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tick","power_levels"],
+      "properties": {
+        "tick": { "type": "number" },
+        "power_levels": { "type": "integer", "minimum": 1 },
+        "turn_ticks": { "type": "number", "default": 0 },
+        "via_ticks": { "type": "number", "default": 0 }
+      }
+    },
+    "cells": { "type": "array", "items": { "$ref": "#/$defs/cell" } }
+  },
+  "$defs": {
+    "delay_arc": {
+      "type": "object", "additionalProperties": false,
+      "required": ["from","to","ticks"],
+      "properties": {
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "ticks": { "type": "number", "minimum": 0 },
+        "when": { "type": "object", "description": "Optional predicate: {state:{...}, facing:'north', params:{...}}" }
+      }
+    },
+    "footprint": {
+      "type": "object", "additionalProperties": false,
+      "required": ["size","voxels","connectors"],
+      "properties": {
+        "size": { "type": "object", "additionalProperties": false, "required": ["x","y","z"], "properties": {
+          "x": { "type": "integer", "minimum": 1 }, "y": { "type": "integer", "minimum": 1 }, "z": { "type": "integer", "minimum": 1 }
+        }},
+        "voxels": { "type": "array", "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["block","x","y","z","state"],
+          "properties": {
+            "block": { "type": "string" },
+            "state": { "type": "object", "additionalProperties": { "type": ["string","number","boolean"] } },
+            "x": { "type": "integer" }, "y": { "type": "integer" }, "z": { "type": "integer" }
+          }
+        }},
+        "connectors": { "type": "array", "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["pin","x","y","z","facing"],
+          "properties": {
+            "pin": { "type": "string" },
+            "x": { "type": "integer" }, "y": { "type": "integer" }, "z": { "type": "integer" },
+            "facing": { "enum": ["north","south","east","west","up","down"] }
+          }
+        }},
+        "keepouts": { "type": "array", "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["x1","y1","z1","x2","y2","z2"],
+          "properties": {
+            "x1":{"type":"integer"},"y1":{"type":"integer"},"z1":{"type":"integer"},
+            "x2":{"type":"integer"},"y2":{"type":"integer"},"z2":{"type":"integer"},
+            "inclusive": { "enum": ["minmax","min-only","max-only","none"], "default": "minmax" }
+          }
+        }},
+        "rot_overrides": { "type": "object", "additionalProperties": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "connectors": { "type": "array", "items": { "$ref": "#/$defs/connector" } },
+            "voxels": { "type": "array", "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["block","x","y","z","state"],
+              "properties": {
+                "block": { "type": "string" },
+                "state": { "type": "object", "additionalProperties": { "type": ["string","number","boolean"] } },
+                "x": { "type": "integer" }, "y": { "type": "integer" }, "z": { "type": "integer" }
+              }
+            } }
+          }
+        }}
+      }
+    },
+
+    "connector": { "$ref": "#/$defs/footprint/properties/connectors/items" },
+
+    "cell": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name","kind","pins","delays","footprint","rotations"],
+      "properties": {
+        "name": { "type": "string" },
+        "kind": { "enum": ["COMB","SEQ","WIRE","VIA","IO","MACRO"] },
+        "pins": { "type": "array", "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["name","dir","bitwidth"],
+          "properties": {
+            "name": { "type": "string" },
+            "dir": { "enum": ["in","out","inout"] },
+            "bitwidth": { "type": "integer", "minimum": 1 },
+            "function": { "type": "string" }
+          }
+        }},
+        "params": { "type": "object", "description":"E.g., repeater delay (1..4)" },
+        "delays": { "type": "array", "items": { "$ref": "#/$defs/delay_arc" } },
+        "footprint": { "$ref": "#/$defs/footprint" },
+        "rotations": { "type": "array", "items": { "enum": ["R0","R90","R180","R270","MX","MY","MZ"] } },
+        "attrs": { "type": "object" }
+      }
+    }
+  }
+}

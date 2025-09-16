@@ -1,0 +1,29 @@
+{
+  "$id": "https://v2m.dev/schemas/wir#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "V2M World Instruction Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v","target","ops"],
+  "properties": {
+    "v": { "type": "string", "const": "wir-1.1" },
+    "target": { "enum": ["redstone-world","datapack"] },
+    "ops": { "type": "array", "items": {
+      "oneOf": [
+        { "type":"object","additionalProperties": false,"required": ["op","x","y","z","block","state"], "properties": {
+          "op":{"const":"setblock"}, "x":{"type":"integer"}, "y":{"type":"integer"}, "z":{"type":"integer"},
+          "block":{"type":"string"}, "state":{"type":"object"}
+        }},
+        { "type":"object","additionalProperties": false,"required": ["op","structure","x","y","z","rot"], "properties": {
+          "op":{"const":"placestructure"}, "structure":{"type":"string"},
+          "x":{"type":"integer"},"y":{"type":"integer"},"z":{"type":"integer"},
+          "rot":{"enum":["R0","R90","R180","R270"]}
+        }},
+        { "type":"object","additionalProperties": false,"required": ["op","path","content"], "properties": {
+          "op":{"const":"writefile"}, "path":{"type":"string"}, "content":{"type":"string"},
+          "stage":{"enum":["load","tick_read","tick_comb","tick_write"],"description":"datapack only"}
+        }}
+      ]
+    }}
+  }
+}
