@@ -8,6 +8,8 @@ license = "MIT"
 v2m-formats = { path = "../formats" }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 v2m-formats = { path = "../formats" }
+insta = { workspace = true }
