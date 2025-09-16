@@ -12,7 +12,7 @@ pub mod tir;
 pub mod wir;
 
 pub use constraints::Constraints;
-pub use nir::{BitRef, Nir};
+pub use nir::{BitRef, Nir, load_nir, save_nir};
 pub use pir::Pir;
 pub use techlib::Techlib;
 pub use tir::Tir;
