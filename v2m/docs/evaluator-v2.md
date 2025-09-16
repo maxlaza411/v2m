@@ -31,14 +31,14 @@ Evaluator v2 operates on *batches* of stimulus vectors. A batch size is the numb
 
 Two axes control the packed representation of a signal:
 
-* **Bit lanes** — a `width`-bit signal requires `L = ceil(width / 64)` lanes. A lane stores up to 64 adjacent bits from the signal.
+* **Bit lanes** — a `width`-bit signal requires `L = width` lanes. Each lane tracks a single bit from the signal across all vectors.
 * **Vector words** — `N` vectors are processed in groups of 64, yielding `W = ceil(N / 64)` words per lane. Each bit inside a word is one vector.
 
 The storage for a signal therefore forms an `L × W` matrix of `u64`. All logic kernels operate on this matrix layout.
 
 ### Packed storage
 
-`Packed` is the reusable storage arena for these matrices. A `Packed` value owns an SoA buffer sized for a specific batch. Slices inside the arena are described by `PackedIndex`, which stores the offset and lane count for a signal. The same index can be reused across multiple `Packed` values that share a layout (for example the current and next register images).
+`Packed` is the reusable storage arena for these matrices. A `Packed` value owns an SoA buffer sized for a specific batch. Slices inside the arena are described by `PackedIndex`, which stores the offset and lane count for a signal. The same index can be reused across multiple `Packed` values that share a layout (for example the current and next register images). Because each lane represents a single signal bit, the lane count for a signal matches its bit width.
 
 ```rust
 pub struct Packed {
