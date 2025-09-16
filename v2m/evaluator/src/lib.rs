@@ -642,6 +642,77 @@ mod tests {
         BitRef, BitRefNet, Module as NirModule, Net as NirNet, Node as NirNode, Port as NirPort,
     };
 
+    fn build_and_module(width: u32) -> Nir {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "a".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: width,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "b".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: width,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "y".to_string(),
+            NirPort {
+                dir: PortDirection::Output,
+                bits: width,
+                attrs: None,
+            },
+        );
+
+        let mut nets = BTreeMap::new();
+        nets.insert(
+            "a".to_string(),
+            NirNet {
+                bits: width,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "b".to_string(),
+            NirNet {
+                bits: width,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "y".to_string(),
+            NirNet {
+                bits: width,
+                attrs: None,
+            },
+        );
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "and0".to_string(),
+            NirNode {
+                uid: "and0".to_string(),
+                op: NodeOp::And,
+                width,
+                pin_map: BTreeMap::from([
+                    ("A".to_string(), net_bit("a")),
+                    ("B".to_string(), net_bit("b")),
+                    ("Y".to_string(), net_bit("y")),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+
+        let module = NirModule { ports, nets, nodes };
+        build_nir(module)
+    }
+
     #[test]
     fn packed_lane_and_word_indexing() {
         let mut packed = Packed::new(128);
@@ -1093,6 +1164,77 @@ mod tests {
         let value = outputs.lane(output_index, 0)[0];
         assert_eq!(value, 0xFFFF_0000_FFFF_0000u64 & 0x0F0F_0F0F_0F0F_0F0Fu64);
     }
+
+    #[test]
+    fn batch_execution_matches_single_vector() {
+        let nir = build_and_module(8);
+        let mut rng = StdRng::seed_from_u64(0xFACE_CAFE);
+        let batch_sizes = [1usize, 63, 64, 65, 4096];
+
+        for &num_vectors in &batch_sizes {
+            let mut batch_eval =
+                Evaluator::new(&nir, num_vectors, SimOptions::default()).expect("batch eval");
+            let output_names: Vec<String> =
+                batch_eval.output_ports.keys().cloned().collect();
+
+            let mut input_vectors: HashMap<String, Vec<BigUint>> = HashMap::new();
+            input_vectors.insert(
+                "a".to_string(),
+                random_biguints(8, num_vectors, &mut rng),
+            );
+            input_vectors.insert(
+                "b".to_string(),
+                random_biguints(8, num_vectors, &mut rng),
+            );
+
+            let packed_inputs = batch_eval
+                .pack_inputs_from_biguints(&input_vectors)
+                .expect("pack batch inputs");
+            let reset = PackedBitMask::new(num_vectors);
+            let packed_outputs = batch_eval
+                .tick(&packed_inputs, &reset)
+                .expect("batch tick");
+            let batch_outputs = batch_eval
+                .unpack_outputs_to_biguints(&packed_outputs)
+                .expect("unpack batch outputs");
+
+            let mut expected: HashMap<String, Vec<BigUint>> = output_names
+                .iter()
+                .map(|name| (name.clone(), Vec::with_capacity(num_vectors)))
+                .collect();
+
+            let mut scalar_eval =
+                Evaluator::new(&nir, 1, SimOptions::default()).expect("scalar eval");
+            let scalar_reset = PackedBitMask::new(1);
+
+            for vector_idx in 0..num_vectors {
+                let mut single_inputs = HashMap::new();
+                for (name, values) in &input_vectors {
+                    single_inputs.insert(name.clone(), vec![values[vector_idx].clone()]);
+                }
+
+                let packed_single = scalar_eval
+                    .pack_inputs_from_biguints(&single_inputs)
+                    .expect("pack scalar inputs");
+                let single_outputs_packed = scalar_eval
+                    .tick(&packed_single, &scalar_reset)
+                    .expect("scalar tick");
+                let single_outputs = scalar_eval
+                    .unpack_outputs_to_biguints(&single_outputs_packed)
+                    .expect("unpack scalar outputs");
+
+                for (name, values) in single_outputs {
+                    let value = values.into_iter().next().expect("single vector");
+                    expected
+                        .get_mut(&name)
+                        .expect("expected output")
+                        .push(value);
+                }
+            }
+
+            assert_eq!(batch_outputs, expected, "num_vectors = {}", num_vectors);
+        }
+    }
 }
 
 impl<'nir> Evaluator<'nir> {
@@ -1396,8 +1538,8 @@ impl<'nir> Evaluator<'nir> {
     fn stage_inputs(&mut self) {
         for (port_name, &port_index) in &self.input_ports {
             if let Some(&net_index) = self.net_indices.get(port_name.as_str()) {
-                let values = self.inputs.slice(port_index).to_vec();
-                self.nets.slice_mut(net_index).copy_from_slice(&values);
+                let values = self.inputs.slice(port_index);
+                self.nets.slice_mut(net_index).copy_from_slice(values);
             }
         }
     }
@@ -1405,8 +1547,8 @@ impl<'nir> Evaluator<'nir> {
     fn stage_outputs(&mut self) {
         for (port_name, &port_index) in &self.output_ports {
             if let Some(&net_index) = self.net_indices.get(port_name.as_str()) {
-                let values = self.nets.slice(net_index).to_vec();
-                self.outputs.slice_mut(port_index).copy_from_slice(&values);
+                let values = self.nets.slice(net_index);
+                self.outputs.slice_mut(port_index).copy_from_slice(values);
             }
         }
     }
@@ -1430,12 +1572,17 @@ impl<'nir> Evaluator<'nir> {
             return;
         }
 
-        let input_words = self.nets.slice(kernel.input).to_vec();
-        let output_slice = self.nets.slice_mut(kernel.output);
-        for (index, word) in output_slice.iter_mut().enumerate() {
-            let lane_word = index % words_per_lane;
-            let mask = mask_for_word(lane_word, words_per_lane, self.num_vectors);
-            *word = (!input_words[index]) & mask;
+        debug_assert_eq!(kernel.input.lanes, kernel.output.lanes);
+
+        for lane in 0..kernel.output.lanes {
+            let input_base = kernel.input.lane_offset(lane, words_per_lane);
+            let output_base = kernel.output.lane_offset(lane, words_per_lane);
+
+            for word_idx in 0..words_per_lane {
+                let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
+                let input_word = self.nets.storage[input_base + word_idx];
+                self.nets.storage[output_base + word_idx] = (!input_word) & mask;
+            }
         }
     }
 
@@ -1445,13 +1592,22 @@ impl<'nir> Evaluator<'nir> {
             return;
         }
 
-        let input_a = self.nets.slice(kernel.input_a).to_vec();
-        let input_b = self.nets.slice(kernel.input_b).to_vec();
-        let output_slice = self.nets.slice_mut(kernel.output);
-        for (index, word) in output_slice.iter_mut().enumerate() {
-            let lane_word = index % words_per_lane;
-            let mask = mask_for_word(lane_word, words_per_lane, self.num_vectors);
-            *word = (input_a[index] & input_b[index]) & mask;
+        debug_assert_eq!(kernel.input_a.lanes, kernel.output.lanes);
+        debug_assert_eq!(kernel.input_b.lanes, kernel.output.lanes);
+
+        for lane in 0..kernel.output.lanes {
+            let input_a_base = kernel.input_a.lane_offset(lane, words_per_lane);
+            let input_b_base = kernel.input_b.lane_offset(lane, words_per_lane);
+            let output_base = kernel.output.lane_offset(lane, words_per_lane);
+
+            for word_idx in 0..words_per_lane {
+                let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
+                let value =
+                    (self.nets.storage[input_a_base + word_idx]
+                        & self.nets.storage[input_b_base + word_idx])
+                        & mask;
+                self.nets.storage[output_base + word_idx] = value;
+            }
         }
     }
 
