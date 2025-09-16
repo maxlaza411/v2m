@@ -1,7 +1,8 @@
 [workspace]
 members = [
     "core/formats",
-    "core/nir"
+    "core/nir",
+    "evaluator"
 ]
 resolver = "2"
 
