@@ -6,6 +6,8 @@ use jsonschema::{Draft, JSONSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::path::Path;
 use std::sync::LazyLock;
 
 static SCHEMA_JSON: LazyLock<Value> = LazyLock::new(|| {
@@ -46,6 +48,25 @@ pub fn to_value(nir: &Nir) -> Result<Value, Error> {
 
 pub fn to_writer<W: std::io::Write>(nir: &Nir, writer: W) -> Result<(), Error> {
     write_validated(nir, writer, validate_json)
+}
+
+pub fn load_nir(path: impl AsRef<Path>) -> Result<Nir, Error> {
+    let file = File::open(path)?;
+    from_reader(file)
+}
+
+pub fn save_nir(nir: &Nir, path: impl AsRef<Path>) -> Result<(), Error> {
+    let path = path.as_ref();
+    let file = File::create(path)?;
+    to_writer(nir, file)?;
+
+    #[cfg(debug_assertions)]
+    {
+        let file = File::open(path)?;
+        from_reader(file)?;
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
