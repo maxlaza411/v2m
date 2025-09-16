@@ -437,6 +437,8 @@ enum NodeKernel {
     Const(ConstKernel),
     Not(UnaryKernel),
     And(BinaryKernel),
+    Add(BinaryKernel),
+    Sub(BinaryKernel),
 }
 
 fn bitref_full_net<'a>(bitref: &'a BitRef, expected_width: u32) -> Option<&'a str> {
@@ -871,6 +873,15 @@ mod tests {
         })
     }
 
+    fn net_range(name: &str, width: u32) -> BitRef {
+        assert!(width > 0);
+        BitRef::Net(BitRefNet {
+            net: name.to_string(),
+            lsb: 0,
+            msb: width - 1,
+        })
+    }
+
     fn build_nir(module: NirModule) -> Nir {
         Nir {
             v: "nir-1.1".to_string(),
@@ -881,6 +892,152 @@ mod tests {
             generator: None,
             cmdline: None,
             source_digest_sha256: None,
+        }
+    }
+
+    fn build_binary_op_module(op: NodeOp, width: usize) -> Nir {
+        assert!(width > 0);
+        let width_u32 = width as u32;
+
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "a".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: width_u32,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "b".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: width_u32,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "y".to_string(),
+            NirPort {
+                dir: PortDirection::Output,
+                bits: width_u32,
+                attrs: None,
+            },
+        );
+
+        let nets = BTreeMap::from([
+            (
+                "a".to_string(),
+                NirNet {
+                    bits: width_u32,
+                    attrs: None,
+                },
+            ),
+            (
+                "b".to_string(),
+                NirNet {
+                    bits: width_u32,
+                    attrs: None,
+                },
+            ),
+            (
+                "y".to_string(),
+                NirNet {
+                    bits: width_u32,
+                    attrs: None,
+                },
+            ),
+        ]);
+
+        let nodes = BTreeMap::from([(
+            "op0".to_string(),
+            NirNode {
+                uid: "op0".to_string(),
+                op,
+                width: width_u32,
+                pin_map: BTreeMap::from([
+                    ("A".to_string(), net_range("a", width_u32)),
+                    ("B".to_string(), net_range("b", width_u32)),
+                    ("Y".to_string(), net_range("y", width_u32)),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        )]);
+
+        build_nir(NirModule { ports, nets, nodes })
+    }
+
+    fn run_binary_op_test<F>(op: NodeOp, width: usize, mut expected_fn: F)
+    where
+        F: FnMut(&BigUint, &BigUint, &BigUint, &BigUint) -> BigUint,
+    {
+        const NUM_VECTORS: usize = 10_000;
+        let nir = build_binary_op_module(op, width);
+        let mut eval =
+            Evaluator::new(&nir, NUM_VECTORS, SimOptions::default()).expect("create evaluator");
+
+        let mut rng = StdRng::seed_from_u64(0x5eed_face_u64 ^ (width as u64));
+        let mut a_values = random_biguints(width, NUM_VECTORS, &mut rng);
+        let mut b_values = random_biguints(width, NUM_VECTORS, &mut rng);
+
+        let modulus = BigUint::from(1u64) << width;
+        let mask = &modulus - BigUint::from(1u32);
+
+        if NUM_VECTORS > 64 {
+            a_values[63] = mask.clone();
+            b_values[63] = BigUint::from(1u32);
+            a_values[64] = BigUint::default();
+            b_values[64] = BigUint::from(1u32);
+        }
+        if NUM_VECTORS > 128 {
+            a_values[127] = mask.clone();
+            b_values[127] = mask.clone();
+        }
+
+        let mut expected = Vec::with_capacity(NUM_VECTORS);
+        for idx in 0..NUM_VECTORS {
+            expected.push(expected_fn(&a_values[idx], &b_values[idx], &mask, &modulus));
+        }
+
+        let mut packed_inputs = eval.inputs.duplicate_layout();
+        let a_index = *eval.input_ports.get("a").expect("input a index");
+        pack_port_biguints(&mut packed_inputs, a_index, width, &a_values, "a")
+            .expect("pack a values");
+        let b_index = *eval.input_ports.get("b").expect("input b index");
+        pack_port_biguints(&mut packed_inputs, b_index, width, &b_values, "b")
+            .expect("pack b values");
+
+        eval.set_inputs(&packed_inputs).expect("set inputs");
+        eval.comb_eval().expect("comb eval");
+
+        let outputs = eval.get_outputs();
+        let unpacked = eval
+            .unpack_outputs_to_biguints(&outputs)
+            .expect("unpack outputs");
+        assert_eq!(unpacked["y"], expected);
+    }
+
+    #[test]
+    fn comb_eval_add_matches_biguint_reference() {
+        for width in [32usize, 64, 65] {
+            run_binary_op_test(NodeOp::Add, width, |a, b, mask, _| {
+                let mut sum = a + b;
+                sum &= mask;
+                sum
+            });
+        }
+    }
+
+    #[test]
+    fn comb_eval_sub_matches_biguint_reference() {
+        for width in [32usize, 64, 65] {
+            run_binary_op_test(NodeOp::Sub, width, |a, b, mask, modulus| {
+                let mut diff = a + modulus;
+                diff -= b;
+                diff &= mask;
+                diff
+            });
         }
     }
 
@@ -1416,6 +1573,8 @@ impl<'nir> Evaluator<'nir> {
             NodeKernel::Const(kernel) => self.run_const(kernel),
             NodeKernel::Not(kernel) => self.run_not(kernel),
             NodeKernel::And(kernel) => self.run_and(kernel),
+            NodeKernel::Add(kernel) => self.run_add(kernel),
+            NodeKernel::Sub(kernel) => self.run_sub(kernel),
         }
     }
 
@@ -1448,10 +1607,94 @@ impl<'nir> Evaluator<'nir> {
         let input_a = self.nets.slice(kernel.input_a).to_vec();
         let input_b = self.nets.slice(kernel.input_b).to_vec();
         let output_slice = self.nets.slice_mut(kernel.output);
+        let masks: Vec<u64> = (0..words_per_lane)
+            .map(|word| mask_for_word(word, words_per_lane, self.num_vectors))
+            .collect();
         for (index, word) in output_slice.iter_mut().enumerate() {
-            let lane_word = index % words_per_lane;
-            let mask = mask_for_word(lane_word, words_per_lane, self.num_vectors);
+            let mask = masks[index % words_per_lane];
             *word = (input_a[index] & input_b[index]) & mask;
+        }
+    }
+
+    fn run_add(&mut self, kernel: &BinaryKernel) {
+        let words_per_lane = self.nets.words_per_lane();
+        if words_per_lane == 0 {
+            return;
+        }
+
+        let lanes = kernel.output.lanes();
+        if lanes == 0 {
+            return;
+        }
+
+        let masks: Vec<u64> = (0..words_per_lane)
+            .map(|word| mask_for_word(word, words_per_lane, self.num_vectors))
+            .collect();
+        let lane_stride = words_per_lane;
+
+        let input_a = self.nets.slice(kernel.input_a).to_vec();
+        let input_b = self.nets.slice(kernel.input_b).to_vec();
+        let output_slice = self.nets.slice_mut(kernel.output);
+
+        let mut carry = vec![0u64; words_per_lane];
+
+        for lane in 0..lanes {
+            let lane_offset = lane * lane_stride;
+            for word_idx in 0..words_per_lane {
+                let offset = lane_offset + word_idx;
+                let mask = masks[word_idx];
+                let a = input_a[offset] & mask;
+                let b = input_b[offset] & mask;
+                let carry_in = carry[word_idx] & mask;
+
+                let sum_ab = a ^ b;
+                let sum = sum_ab ^ carry_in;
+                let carry_out = ((a & b) | (sum_ab & carry_in)) & mask;
+
+                output_slice[offset] = sum & mask;
+                carry[word_idx] = carry_out;
+            }
+        }
+    }
+
+    fn run_sub(&mut self, kernel: &BinaryKernel) {
+        let words_per_lane = self.nets.words_per_lane();
+        if words_per_lane == 0 {
+            return;
+        }
+
+        let lanes = kernel.output.lanes();
+        if lanes == 0 {
+            return;
+        }
+
+        let masks: Vec<u64> = (0..words_per_lane)
+            .map(|word| mask_for_word(word, words_per_lane, self.num_vectors))
+            .collect();
+        let lane_stride = words_per_lane;
+
+        let input_a = self.nets.slice(kernel.input_a).to_vec();
+        let input_b = self.nets.slice(kernel.input_b).to_vec();
+        let output_slice = self.nets.slice_mut(kernel.output);
+
+        let mut carry: Vec<u64> = masks.clone();
+
+        for lane in 0..lanes {
+            let lane_offset = lane * lane_stride;
+            for word_idx in 0..words_per_lane {
+                let offset = lane_offset + word_idx;
+                let mask = masks[word_idx];
+                let a = input_a[offset] & mask;
+                let b_inv = (!input_b[offset]) & mask;
+                let carry_in = carry[word_idx] & mask;
+
+                let sum_ab = a ^ b_inv;
+                let sum = sum_ab ^ carry_in;
+                let carry_out = ((a & b_inv) | (sum_ab & carry_in)) & mask;
+
+                output_slice[offset] = sum & mask;
+                carry[word_idx] = carry_out;
+            }
         }
     }
 
@@ -1480,6 +1723,8 @@ impl<'nir> Evaluator<'nir> {
                 }
                 NodeOp::Not => Self::build_not_kernel(node, net_indices).map(NodeKernel::Not),
                 NodeOp::And => Self::build_and_kernel(node, net_indices).map(NodeKernel::And),
+                NodeOp::Add => Self::build_add_kernel(node, net_indices).map(NodeKernel::Add),
+                NodeOp::Sub => Self::build_sub_kernel(node, net_indices).map(NodeKernel::Sub),
                 _ => None,
             };
 
@@ -1560,6 +1805,27 @@ impl<'nir> Evaluator<'nir> {
     }
 
     fn build_and_kernel(
+        node: &v2m_formats::nir::Node,
+        net_indices: &HashMap<String, PackedIndex>,
+    ) -> Option<BinaryKernel> {
+        Self::build_binary_kernel(node, net_indices)
+    }
+
+    fn build_add_kernel(
+        node: &v2m_formats::nir::Node,
+        net_indices: &HashMap<String, PackedIndex>,
+    ) -> Option<BinaryKernel> {
+        Self::build_binary_kernel(node, net_indices)
+    }
+
+    fn build_sub_kernel(
+        node: &v2m_formats::nir::Node,
+        net_indices: &HashMap<String, PackedIndex>,
+    ) -> Option<BinaryKernel> {
+        Self::build_binary_kernel(node, net_indices)
+    }
+
+    fn build_binary_kernel(
         node: &v2m_formats::nir::Node,
         net_indices: &HashMap<String, PackedIndex>,
     ) -> Option<BinaryKernel> {
