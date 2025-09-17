@@ -13,3 +13,4 @@ serde = { workspace = true }
 [dev-dependencies]
 v2m-formats = { path = "../formats" }
 insta = { workspace = true }
+tempfile = "3"
