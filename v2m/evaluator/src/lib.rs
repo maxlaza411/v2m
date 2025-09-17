@@ -5,11 +5,11 @@ use num_traits::Zero;
 
 use thiserror::Error;
 use v2m_formats::nir::{BitRef, Module, Nir, NodeOp, PortDirection};
-use v2m_nir::{BuildError as GraphBuildError, EvalOrderError, ModuleGraph, NodeId};
+use v2m_nir::{BuildError as GraphBuildError, EvalOrderError, ModuleGraph, NetId, NodeId};
 
 mod pin_binding;
 
-use pin_binding::{bind_bitref, BitBinding, ConstPool, PinBindingError};
+use pin_binding::{bind_bitref, BitBinding, ConstPool, PinBindingError, SignalId, LANE_BITS};
 
 const WORD_BITS: usize = 64;
 
@@ -131,7 +131,7 @@ pub struct Evaluator<'nir> {
     num_vectors: usize,
     nets: Packed,
     net_indices: HashMap<String, PackedIndex>,
-    net_indices_by_id: Vec<PackedIndex>,
+    net_indices_by_id: HashMap<NetId, PackedIndex>,
     regs_cur: Packed,
     regs_next: Packed,
     reg_indices: HashMap<String, PackedIndex>,
@@ -140,6 +140,7 @@ pub struct Evaluator<'nir> {
     outputs: Packed,
     output_ports: HashMap<String, PackedIndex>,
     node_bindings: HashMap<NodeId, NodePinBindings>,
+    dff_nodes: Vec<DffInfo>,
     const_pool: ConstPool,
     comb_kernels: HashMap<NodeId, NodeKernel>,
 }
@@ -447,6 +448,13 @@ enum NodeKernel {
     Not(UnaryKernel),
     And(BinaryKernel),
     Mux(MuxKernel),
+}
+
+#[derive(Clone, Debug)]
+struct DffInfo {
+    reg_index: PackedIndex,
+    d_binding: BitBinding,
+    q_binding: BitBinding,
 }
 
 fn bitref_full_net<'a>(bitref: &'a BitRef, expected_width: u32) -> Option<&'a str> {
@@ -1532,6 +1540,243 @@ mod tests {
         assert_eq!(lane1[0], inputs.lane(input_a, 1)[0] & mask0);
         assert_eq!(lane1[1], inputs.lane(input_b, 1)[1] & mask1);
     }
+
+    fn net_bit_index(name: &str, index: u32) -> BitRef {
+        BitRef::Net(BitRefNet {
+            net: name.to_string(),
+            lsb: index,
+            msb: index,
+        })
+    }
+
+    fn build_counter_nir(width: u32) -> Nir {
+        let ports = BTreeMap::new();
+
+        let mut nets = BTreeMap::new();
+        nets.insert(
+            "clk".to_string(),
+            NirNet {
+                bits: 1,
+                attrs: None,
+            },
+        );
+
+        for bit in 0..=width {
+            nets.insert(
+                format!("carry_{bit}"),
+                NirNet {
+                    bits: 1,
+                    attrs: None,
+                },
+            );
+        }
+
+        for bit in 0..width {
+            nets.insert(
+                format!("value_{bit}"),
+                NirNet {
+                    bits: 1,
+                    attrs: None,
+                },
+            );
+            nets.insert(
+                format!("next_{bit}"),
+                NirNet {
+                    bits: 1,
+                    attrs: None,
+                },
+            );
+            nets.insert(
+                format!("not_{bit}"),
+                NirNet {
+                    bits: 1,
+                    attrs: None,
+                },
+            );
+        }
+
+        let mut nodes = BTreeMap::new();
+
+        let mut const_params = BTreeMap::new();
+        const_params.insert("value".to_string(), Value::String("1".to_string()));
+        nodes.insert(
+            "carry_init".to_string(),
+            NirNode {
+                uid: "carry_init".to_string(),
+                op: NodeOp::Const,
+                width: 1,
+                pin_map: BTreeMap::from([("Y".to_string(), net_bit("carry_0"))]),
+                params: Some(const_params),
+                attrs: None,
+            },
+        );
+
+        for bit in 0..width {
+            let value_net = format!("value_{bit}");
+            let next_net = format!("next_{bit}");
+            let carry_net = format!("carry_{bit}");
+            let carry_next_net = format!("carry_{}", bit + 1);
+            let not_net = format!("not_{bit}");
+            let state_name = format!("state_{bit}");
+
+            nodes.insert(
+                format!("inv_{bit}"),
+                NirNode {
+                    uid: format!("inv_{bit}"),
+                    op: NodeOp::Not,
+                    width: 1,
+                    pin_map: BTreeMap::from([
+                        ("A".to_string(), net_bit_index(&value_net, 0)),
+                        ("Y".to_string(), net_bit_index(&not_net, 0)),
+                    ]),
+                    params: None,
+                    attrs: None,
+                },
+            );
+
+            nodes.insert(
+                format!("sum_{bit}"),
+                NirNode {
+                    uid: format!("sum_{bit}"),
+                    op: NodeOp::Mux,
+                    width: 1,
+                    pin_map: BTreeMap::from([
+                        ("A".to_string(), net_bit_index(&value_net, 0)),
+                        ("B".to_string(), net_bit_index(&not_net, 0)),
+                        ("S".to_string(), net_bit_index(&carry_net, 0)),
+                        ("Y".to_string(), net_bit_index(&next_net, 0)),
+                    ]),
+                    params: None,
+                    attrs: None,
+                },
+            );
+
+            nodes.insert(
+                format!("carry_and_{bit}"),
+                NirNode {
+                    uid: format!("carry_and_{bit}"),
+                    op: NodeOp::And,
+                    width: 1,
+                    pin_map: BTreeMap::from([
+                        ("A".to_string(), net_bit_index(&value_net, 0)),
+                        ("B".to_string(), net_bit_index(&carry_net, 0)),
+                        ("Y".to_string(), net_bit_index(&carry_next_net, 0)),
+                    ]),
+                    params: None,
+                    attrs: None,
+                },
+            );
+
+            nodes.insert(
+                state_name.clone(),
+                NirNode {
+                    uid: state_name,
+                    op: NodeOp::Dff,
+                    width: 1,
+                    pin_map: BTreeMap::from([
+                        ("D".to_string(), net_bit_index(&next_net, 0)),
+                        ("Q".to_string(), net_bit_index(&value_net, 0)),
+                        ("CLK".to_string(), net_bit("clk")),
+                    ]),
+                    params: None,
+                    attrs: None,
+                },
+            );
+        }
+
+        let module = NirModule { ports, nets, nodes };
+        build_nir(module)
+    }
+
+    fn packed_scalar_value(packed: &Packed, index: PackedIndex, width: usize) -> u64 {
+        let words_per_lane = packed.words_per_lane();
+        if words_per_lane == 0 {
+            return 0;
+        }
+
+        let mut value = 0u64;
+        for bit in 0..width {
+            let lane_words = packed.lane(index, bit);
+            if !lane_words.is_empty() && (lane_words[0] & 1) != 0 {
+                value |= 1u64 << bit;
+            }
+        }
+        value
+    }
+
+    fn packed_registers_value(packed: &Packed, indices: &[PackedIndex]) -> u64 {
+        if packed.words_per_lane() == 0 {
+            return 0;
+        }
+
+        indices.iter().enumerate().fold(0u64, |acc, (bit, index)| {
+            let lane = packed.lane(*index, 0);
+            if !lane.is_empty() && (lane[0] & 1) != 0 {
+                acc | (1u64 << bit)
+            } else {
+                acc
+            }
+        })
+    }
+
+    #[test]
+    fn dff_register_state_persists() {
+        let nir = build_counter_nir(1);
+        let mut eval = Evaluator::new(&nir, 1, SimOptions::default()).expect("create evaluator");
+        let reset_mask = PackedBitMask::new(1);
+        let state_index = eval.register_index("state_0").expect("register index");
+
+        let mut expected_state = packed_scalar_value(&eval.get_registers_q(), state_index, 1);
+        assert_eq!(expected_state, 0);
+
+        for _ in 0..8 {
+            eval.comb_eval().expect("comb eval");
+
+            let current_state = packed_scalar_value(&eval.get_registers_q(), state_index, 1);
+            assert_eq!(current_state, expected_state);
+
+            let next_state = packed_scalar_value(&eval.get_registers_d(), state_index, 1);
+            let expected_next = expected_state ^ 1;
+            assert_eq!(next_state, expected_next);
+
+            eval.step_clock(&reset_mask).expect("step clock");
+            expected_state = packed_scalar_value(&eval.get_registers_q(), state_index, 1);
+            assert_eq!(expected_state, expected_next);
+        }
+    }
+
+    #[test]
+    fn dff_32bit_counter_increments() {
+        let width = 32u32;
+        let nir = build_counter_nir(width);
+        let mut eval = Evaluator::new(&nir, 1, SimOptions::default()).expect("create evaluator");
+        let reset_mask = PackedBitMask::new(1);
+        let register_indices: Vec<PackedIndex> = (0..width as usize)
+            .map(|bit| {
+                eval.register_index(&format!("state_{bit}"))
+                    .expect("register index")
+            })
+            .collect();
+
+        let mut current = packed_registers_value(&eval.get_registers_q(), &register_indices);
+        assert_eq!(current, 0);
+
+        let mask = if width == 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
+
+        for _ in 0..70 {
+            eval.comb_eval().expect("comb eval");
+            let next = packed_registers_value(&eval.get_registers_d(), &register_indices);
+            assert_eq!(next, (current + 1) & mask);
+
+            eval.step_clock(&reset_mask).expect("step clock");
+            current = packed_registers_value(&eval.get_registers_q(), &register_indices);
+            assert_eq!(current, next);
+        }
+    }
 }
 
 impl<'nir> Evaluator<'nir> {
@@ -1550,11 +1795,14 @@ impl<'nir> Evaluator<'nir> {
 
         let mut nets = Packed::new(num_vectors);
         let mut net_indices = HashMap::new();
-        let mut net_indices_by_id = Vec::with_capacity(module.nets.len());
+        let mut net_indices_by_id = HashMap::new();
         for (name, net) in &module.nets {
             let index = nets.allocate(net.bits as usize);
             net_indices.insert(name.clone(), index);
-            net_indices_by_id.push(index);
+            let net_id = graph
+                .net_id(name.as_str())
+                .expect("net must exist in module graph");
+            net_indices_by_id.insert(net_id, index);
         }
 
         let mut regs_cur = Packed::new(num_vectors);
@@ -1586,6 +1834,36 @@ impl<'nir> Evaluator<'nir> {
                         }
                     })?;
                 entry.pins.insert(pin_name.clone(), binding);
+            }
+        }
+
+        let mut dff_nodes = Vec::new();
+        for (node_name, node) in &module.nodes {
+            if matches!(node.op, NodeOp::Dff) {
+                let node_id = graph
+                    .node_id(node_name.as_str())
+                    .expect("node must exist in graph");
+                let bindings = node_bindings
+                    .get(&node_id)
+                    .expect("DFF node must have pin bindings");
+                let d_binding = bindings
+                    .pins
+                    .get("D")
+                    .expect("DFF node must bind D pin")
+                    .clone();
+                let q_binding = bindings
+                    .pins
+                    .get("Q")
+                    .expect("DFF node must bind Q pin")
+                    .clone();
+                let reg_index = *reg_indices
+                    .get(node_name)
+                    .expect("DFF node must have allocated register");
+                dff_nodes.push(DffInfo {
+                    reg_index,
+                    d_binding,
+                    q_binding,
+                });
             }
         }
 
@@ -1642,6 +1920,7 @@ impl<'nir> Evaluator<'nir> {
             outputs,
             output_ports,
             node_bindings,
+            dff_nodes,
             const_pool,
             comb_kernels,
         })
@@ -1814,6 +2093,7 @@ impl<'nir> Evaluator<'nir> {
 
     pub fn comb_eval(&mut self) -> Result<(), Error> {
         self.stage_inputs();
+        self.stage_registers();
 
         let levels = self.topo_level_offsets.len().saturating_sub(1);
         for level in 0..levels {
@@ -1828,6 +2108,7 @@ impl<'nir> Evaluator<'nir> {
             }
         }
 
+        self.capture_registers();
         self.stage_outputs();
         Ok(())
     }
@@ -1841,12 +2122,104 @@ impl<'nir> Evaluator<'nir> {
         }
     }
 
+    fn stage_registers(&mut self) {
+        let bits_per_lane = LANE_BITS as usize;
+
+        for dff in &self.dff_nodes {
+            let mut reg_lane = 0usize;
+            for descriptor in dff.q_binding.descriptors() {
+                let width = descriptor.width as usize;
+                let base_bit = descriptor.lane_offset as usize * bits_per_lane
+                    + descriptor.bit_offset as usize;
+                match descriptor.source {
+                    SignalId::Net(net_id) => {
+                        let net_index = *self
+                            .net_indices_by_id
+                            .get(&net_id)
+                            .expect("net index for descriptor");
+                        for bit in 0..width {
+                            let reg_lane_idx = reg_lane + bit;
+                            debug_assert!(reg_lane_idx < dff.reg_index.lanes());
+                            let net_lane = base_bit + bit;
+                            debug_assert!(net_lane < net_index.lanes());
+                            let source = self.regs_cur.lane(dff.reg_index, reg_lane_idx);
+                            let dest = self.nets.lane_mut(net_index, net_lane);
+                            dest.copy_from_slice(source);
+                        }
+                    }
+                    SignalId::Const(_) => {
+                        debug_assert!(false, "DFF Q pins should not bind constants");
+                    }
+                }
+                reg_lane += width;
+            }
+            debug_assert_eq!(reg_lane, dff.reg_index.lanes());
+        }
+    }
+
     fn stage_outputs(&mut self) {
         for (port_name, &port_index) in &self.output_ports {
             if let Some(&net_index) = self.net_indices.get(port_name.as_str()) {
                 let values = self.nets.slice(net_index);
                 self.outputs.slice_mut(port_index).copy_from_slice(values);
             }
+        }
+    }
+
+    fn capture_registers(&mut self) {
+        let bits_per_lane = LANE_BITS as usize;
+        let words_per_lane = self.regs_next.words_per_lane();
+
+        for dff in &self.dff_nodes {
+            {
+                let slice = self.regs_next.slice_mut(dff.reg_index);
+                slice.fill(0);
+            }
+
+            let mut reg_lane = 0usize;
+            for descriptor in dff.d_binding.descriptors() {
+                let width = descriptor.width as usize;
+                let base_bit = descriptor.lane_offset as usize * bits_per_lane
+                    + descriptor.bit_offset as usize;
+                match descriptor.source {
+                    SignalId::Net(net_id) => {
+                        let net_index = *self
+                            .net_indices_by_id
+                            .get(&net_id)
+                            .expect("net index for descriptor");
+                        for bit in 0..width {
+                            let reg_lane_idx = reg_lane + bit;
+                            debug_assert!(reg_lane_idx < dff.reg_index.lanes());
+                            let net_lane = base_bit + bit;
+                            debug_assert!(net_lane < net_index.lanes());
+                            let source = self.nets.lane(net_index, net_lane);
+                            let dest = self.regs_next.lane_mut(dff.reg_index, reg_lane_idx);
+                            dest.copy_from_slice(source);
+                        }
+                    }
+                    SignalId::Const(const_id) => {
+                        let const_value = self.const_pool.get(const_id);
+                        let lane_index = descriptor.lane_offset as usize;
+                        let chunk = const_value.words.get(lane_index).copied().unwrap_or(0);
+                        for bit in 0..width {
+                            let bit_index = descriptor.bit_offset as usize + bit;
+                            let reg_lane_idx = reg_lane + bit;
+                            debug_assert!(reg_lane_idx < dff.reg_index.lanes());
+                            let dest = self.regs_next.lane_mut(dff.reg_index, reg_lane_idx);
+                            if ((chunk >> bit_index) & 1) != 0 {
+                                for word_idx in 0..words_per_lane {
+                                    dest[word_idx] =
+                                        mask_for_word(word_idx, words_per_lane, self.num_vectors);
+                                }
+                            } else {
+                                dest.fill(0);
+                            }
+                        }
+                    }
+                }
+                reg_lane += width;
+            }
+            debug_assert_eq!(reg_lane, dff.reg_index.lanes());
         }
     }
 
@@ -2118,12 +2491,24 @@ impl<'nir> Evaluator<'nir> {
     }
 
     pub fn step_clock(&mut self, _reset_mask: &PackedBitMask) -> Result<(), Error> {
-        // Implementation to be added in a future revision.
+        self.regs_cur.copy_from(&self.regs_next)?;
         Ok(())
     }
 
     pub fn get_outputs(&self) -> Packed {
         self.outputs.clone()
+    }
+
+    pub fn get_registers_q(&self) -> Packed {
+        self.regs_cur.clone()
+    }
+
+    pub fn get_registers_d(&self) -> Packed {
+        self.regs_next.clone()
+    }
+
+    pub fn register_index(&self, name: &str) -> Option<PackedIndex> {
+        self.reg_indices.get(name).copied()
     }
 
     pub fn tick(&mut self, inputs: &Packed, reset_mask: &PackedBitMask) -> Result<Packed, Error> {
