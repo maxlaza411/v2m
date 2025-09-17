@@ -34,9 +34,8 @@ fn eval_full_adder_matches_json_golden() {
         .args([
             "nir",
             "eval",
-            "--nir",
             design.to_str().unwrap(),
-            "--inputs",
+            "--vec",
             inputs.to_str().unwrap(),
             "--out",
             golden_outputs.to_str().unwrap(),
@@ -61,9 +60,8 @@ fn eval_accepts_binary_inputs_and_outputs() {
         .args([
             "nir",
             "eval",
-            "--nir",
             design.to_str().unwrap(),
-            "--inputs",
+            "--vec",
             &format!("bin:{}", inputs_path.to_str().unwrap()),
             "--out",
             &format!("bin:{}", outputs_path.to_str().unwrap()),
@@ -92,9 +90,8 @@ fn eval_reports_golden_mismatch() {
         .args([
             "nir",
             "eval",
-            "--nir",
             design.to_str().unwrap(),
-            "--inputs",
+            "--vec",
             inputs.to_str().unwrap(),
             "--out",
             wrong.path().to_str().unwrap(),
@@ -114,9 +111,8 @@ fn eval_profile_flag_prints_metrics() {
         .args([
             "nir",
             "eval",
-            "--nir",
             design.to_str().unwrap(),
-            "--inputs",
+            "--vec",
             inputs.to_str().unwrap(),
             "--profile",
         ])
@@ -138,9 +134,8 @@ fn eval_profile_json_is_written() {
         .args([
             "nir",
             "eval",
-            "--nir",
             design.to_str().unwrap(),
-            "--inputs",
+            "--vec",
             inputs.to_str().unwrap(),
             "--profile-json",
             profile_path.to_str().unwrap(),
@@ -150,6 +145,69 @@ fn eval_profile_json_is_written() {
 
     let contents = fs::read_to_string(&profile_path).expect("read profile");
     assert!(contents.contains("\"kernels\""));
+}
+
+#[test]
+fn lint_reports_clean_design() {
+    let design = golden("tests/golden/nir/fa1.nir.json");
+
+    Command::cargo_bin("v2m")
+        .expect("binary exists")
+        .args(["nir", "lint", design.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Lint passed"));
+}
+
+#[test]
+fn lint_reports_errors() {
+    let design = cli_data("tests/data/nir/bad.nir.json");
+
+    Command::cargo_bin("v2m")
+        .expect("binary exists")
+        .args(["nir", "lint", design.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("lint failed"))
+        .stderr(predicate::str::contains("no drivers"));
+}
+
+#[test]
+fn stats_outputs_json_metrics() {
+    let design = golden("tests/golden/nir/fa1.nir.json");
+
+    Command::cargo_bin("v2m")
+        .expect("binary exists")
+        .args(["nir", "stats", design.to_str().unwrap(), "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"node_count\": 5"))
+        .stdout(predicate::str::contains("\"net_count\": 8"))
+        .stdout(predicate::str::contains("\"combinational_node_count\": 5"));
+}
+
+#[test]
+fn dot_writes_output_file() {
+    let design = golden("tests/golden/nir/fa1.nir.json");
+    let temp = TempDir::new().expect("temp dir");
+    let dot_path = temp.path().join("out.dot");
+
+    Command::cargo_bin("v2m")
+        .expect("binary exists")
+        .args([
+            "nir",
+            "dot",
+            design.to_str().unwrap(),
+            "-o",
+            dot_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Wrote dot"));
+
+    let contents = fs::read_to_string(&dot_path).expect("read dot output");
+    assert!(contents.contains("digraph \"module\""));
+    assert!(contents.contains("xor_ab"));
 }
 
 fn write_binary_inputs(path: &Path) -> anyhow::Result<()> {
