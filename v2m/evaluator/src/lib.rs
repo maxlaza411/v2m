@@ -496,6 +496,9 @@ enum NodeKernel {
     Const(TransferKernel),
     Not(UnaryKernel),
     And(BinaryKernel),
+    Or(BinaryKernel),
+    Xor(BinaryKernel),
+    Xnor(BinaryKernel),
     Mux(MuxKernel),
     Slice(TransferKernel),
     Cat(TransferKernel),
@@ -2745,6 +2748,9 @@ impl<'nir> Evaluator<'nir> {
             }
             NodeKernel::Not(kernel) => self.run_not(kernel),
             NodeKernel::And(kernel) => self.run_and(kernel),
+            NodeKernel::Or(kernel) => self.run_or(kernel),
+            NodeKernel::Xor(kernel) => self.run_xor(kernel),
+            NodeKernel::Xnor(kernel) => self.run_xnor(kernel),
             NodeKernel::Mux(kernel) => self.run_mux(kernel),
             NodeKernel::Add(kernel) => self.run_arith(kernel),
             NodeKernel::Sub(kernel) => self.run_arith(kernel),
@@ -2819,6 +2825,78 @@ impl<'nir> Evaluator<'nir> {
                 let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
                 let value = (self.nets.storage[input_a_base + word_idx]
                     & self.nets.storage[input_b_base + word_idx])
+                    & mask;
+                self.nets.storage[output_base + word_idx] = value;
+            }
+        }
+    }
+
+    fn run_or(&mut self, kernel: &BinaryKernel) {
+        let words_per_lane = self.nets.words_per_lane();
+        if words_per_lane == 0 {
+            return;
+        }
+
+        debug_assert_eq!(kernel.input_a.lanes, kernel.output.lanes);
+        debug_assert_eq!(kernel.input_b.lanes, kernel.output.lanes);
+
+        for lane in 0..kernel.output.lanes {
+            let input_a_base = kernel.input_a.lane_offset(lane, words_per_lane);
+            let input_b_base = kernel.input_b.lane_offset(lane, words_per_lane);
+            let output_base = kernel.output.lane_offset(lane, words_per_lane);
+
+            for word_idx in 0..words_per_lane {
+                let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
+                let value = (self.nets.storage[input_a_base + word_idx]
+                    | self.nets.storage[input_b_base + word_idx])
+                    & mask;
+                self.nets.storage[output_base + word_idx] = value;
+            }
+        }
+    }
+
+    fn run_xor(&mut self, kernel: &BinaryKernel) {
+        let words_per_lane = self.nets.words_per_lane();
+        if words_per_lane == 0 {
+            return;
+        }
+
+        debug_assert_eq!(kernel.input_a.lanes, kernel.output.lanes);
+        debug_assert_eq!(kernel.input_b.lanes, kernel.output.lanes);
+
+        for lane in 0..kernel.output.lanes {
+            let input_a_base = kernel.input_a.lane_offset(lane, words_per_lane);
+            let input_b_base = kernel.input_b.lane_offset(lane, words_per_lane);
+            let output_base = kernel.output.lane_offset(lane, words_per_lane);
+
+            for word_idx in 0..words_per_lane {
+                let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
+                let value = (self.nets.storage[input_a_base + word_idx]
+                    ^ self.nets.storage[input_b_base + word_idx])
+                    & mask;
+                self.nets.storage[output_base + word_idx] = value;
+            }
+        }
+    }
+
+    fn run_xnor(&mut self, kernel: &BinaryKernel) {
+        let words_per_lane = self.nets.words_per_lane();
+        if words_per_lane == 0 {
+            return;
+        }
+
+        debug_assert_eq!(kernel.input_a.lanes, kernel.output.lanes);
+        debug_assert_eq!(kernel.input_b.lanes, kernel.output.lanes);
+
+        for lane in 0..kernel.output.lanes {
+            let input_a_base = kernel.input_a.lane_offset(lane, words_per_lane);
+            let input_b_base = kernel.input_b.lane_offset(lane, words_per_lane);
+            let output_base = kernel.output.lane_offset(lane, words_per_lane);
+
+            for word_idx in 0..words_per_lane {
+                let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
+                let value = (!(self.nets.storage[input_a_base + word_idx]
+                    ^ self.nets.storage[input_b_base + word_idx]))
                     & mask;
                 self.nets.storage[output_base + word_idx] = value;
             }
@@ -2991,6 +3069,9 @@ impl<'nir> Evaluator<'nir> {
                     .map(NodeKernel::Sub),
                 NodeOp::Not => Self::build_not_kernel(node, net_indices).map(NodeKernel::Not),
                 NodeOp::And => Self::build_and_kernel(node, net_indices).map(NodeKernel::And),
+                NodeOp::Or => Self::build_or_kernel(node, net_indices).map(NodeKernel::Or),
+                NodeOp::Xor => Self::build_xor_kernel(node, net_indices).map(NodeKernel::Xor),
+                NodeOp::Xnor => Self::build_xnor_kernel(node, net_indices).map(NodeKernel::Xnor),
                 NodeOp::Mux => {
                     Self::build_mux_kernel(node, net_indices, words_per_lane, num_vectors)
                         .map(NodeKernel::Mux)
@@ -3397,6 +3478,35 @@ impl<'nir> Evaluator<'nir> {
         node: &v2m_formats::nir::Node,
         net_indices: &HashMap<String, PackedIndex>,
     ) -> Option<BinaryKernel> {
+        Self::build_bitwise_kernel(node, net_indices, "AND")
+    }
+
+    fn build_or_kernel(
+        node: &v2m_formats::nir::Node,
+        net_indices: &HashMap<String, PackedIndex>,
+    ) -> Option<BinaryKernel> {
+        Self::build_bitwise_kernel(node, net_indices, "OR")
+    }
+
+    fn build_xor_kernel(
+        node: &v2m_formats::nir::Node,
+        net_indices: &HashMap<String, PackedIndex>,
+    ) -> Option<BinaryKernel> {
+        Self::build_bitwise_kernel(node, net_indices, "XOR")
+    }
+
+    fn build_xnor_kernel(
+        node: &v2m_formats::nir::Node,
+        net_indices: &HashMap<String, PackedIndex>,
+    ) -> Option<BinaryKernel> {
+        Self::build_bitwise_kernel(node, net_indices, "XNOR")
+    }
+
+    fn build_bitwise_kernel(
+        node: &v2m_formats::nir::Node,
+        net_indices: &HashMap<String, PackedIndex>,
+        op_name: &'static str,
+    ) -> Option<BinaryKernel> {
         let input_a_ref = node.pin_map.get("A")?;
         let input_b_ref = node.pin_map.get("B")?;
         let output_ref = node.pin_map.get("Y")?;
@@ -3404,15 +3514,15 @@ impl<'nir> Evaluator<'nir> {
         let input_b_net = bitref_full_net(input_b_ref, node.width)?;
         let output_net = bitref_full_net(output_ref, node.width)?;
 
-        let input_a = *net_indices
-            .get(input_a_net)
-            .expect("AND A input net must be allocated");
-        let input_b = *net_indices
-            .get(input_b_net)
-            .expect("AND B input net must be allocated");
-        let output = *net_indices
-            .get(output_net)
-            .expect("AND output net must be allocated");
+        let input_a = *net_indices.get(input_a_net).unwrap_or_else(|| {
+            panic!("{op_name} A input net must be allocated");
+        });
+        let input_b = *net_indices.get(input_b_net).unwrap_or_else(|| {
+            panic!("{op_name} B input net must be allocated");
+        });
+        let output = *net_indices.get(output_net).unwrap_or_else(|| {
+            panic!("{op_name} output net must be allocated");
+        });
 
         Some(BinaryKernel {
             input_a,
