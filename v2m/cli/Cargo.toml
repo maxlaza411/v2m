@@ -1,0 +1,30 @@
+[package]
+name = "v2m-cli"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "v2m_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "v2m"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+bincode = { workspace = true }
+clap = { workspace = true }
+num-bigint = { workspace = true }
+num-traits = "0.2"
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+v2m-formats = { path = "../core/formats" }
+v2m-evaluator = { path = "../evaluator" }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
