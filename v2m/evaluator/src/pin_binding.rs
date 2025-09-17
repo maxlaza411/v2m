@@ -7,7 +7,7 @@ use v2m_formats::{resolve_bitref, ResolvedBit};
 use v2m_nir::ModuleGraph;
 use v2m_nir::NetId;
 
-const LANE_BITS: u32 = 64;
+pub(crate) const LANE_BITS: u32 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ConstId(pub(crate) usize);
