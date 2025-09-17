@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use serde_json::Value;
-use tempfile::tempdir;
+use tempfile::{Builder, TempDir};
 
 use v2m_formats::nir::{
     BitRef, BitRefConcat, BitRefConst, BitRefNet, Module, Net, Nir, Node, NodeOp, Port,
@@ -115,8 +118,26 @@ fn yosys_equivalence_fifo() {
     check_sequential_equivalence(&design, FIFO_SPEC, "fifo_small_spec", 8);
 }
 
+fn workspace_tempdir() -> TempDir {
+    static BASE: OnceLock<PathBuf> = OnceLock::new();
+    let base = BASE.get_or_init(|| {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir
+            .parent()
+            .and_then(|dir| dir.parent())
+            .expect("workspace root");
+        let path = workspace_root.join("target/yosys-tmp");
+        fs::create_dir_all(&path).expect("create yosys temp root");
+        path
+    });
+    Builder::new()
+        .prefix("yosys-test-")
+        .tempdir_in(base)
+        .expect("create tempdir in workspace")
+}
+
 fn check_comb_equivalence(design: &Nir, spec: &str, spec_top: &str) {
-    let dir = tempdir().expect("create tempdir");
+    let dir = workspace_tempdir();
     let dut_path = write_temp(
         dir.path(),
         "dut.v",
@@ -132,7 +153,7 @@ fn check_comb_equivalence(design: &Nir, spec: &str, spec_top: &str) {
 }
 
 fn check_sequential_equivalence(design: &Nir, spec: &str, spec_top: &str, cycles: u32) {
-    let dir = tempdir().expect("create tempdir");
+    let dir = workspace_tempdir();
     let dut_path = write_temp(
         dir.path(),
         "dut.v",
@@ -147,8 +168,164 @@ fn check_sequential_equivalence(design: &Nir, spec: &str, spec_top: &str, cycles
     run_yosys(&script_path);
 }
 
+#[derive(Clone)]
+struct YosysCommand {
+    program: PathBuf,
+    args: Vec<OsString>,
+}
+
+fn ensure_yosys() -> YosysCommand {
+    static COMMAND: OnceLock<YosysCommand> = OnceLock::new();
+    COMMAND
+        .get_or_init(|| locate_yosys().unwrap_or_else(install_yowasp_yosys))
+        .clone()
+}
+
+fn locate_yosys() -> Option<YosysCommand> {
+    if let Some(explicit) = std::env::var_os("YOSYS_CMD") {
+        let path = PathBuf::from(&explicit);
+        if path.as_os_str().is_empty() {
+            panic!("YOSYS_CMD environment variable was set but empty");
+        }
+        let output = Command::new(&path)
+            .arg("-V")
+            .output()
+            .unwrap_or_else(|err| panic!("failed to invoke YOSYS_CMD {}: {}", path.display(), err));
+        if !output.status.success() {
+            panic!(
+                "YOSYS_CMD {} failed version probe with status {}:\nstdout:\n{}\nstderr:\n{}",
+                path.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return Some(YosysCommand {
+            program: path,
+            args: Vec::new(),
+        });
+    }
+
+    match Command::new("yosys").arg("-V").output() {
+        Ok(output) => {
+            if output.status.success() {
+                Some(YosysCommand {
+                    program: PathBuf::from("yosys"),
+                    args: Vec::new(),
+                })
+            } else {
+                panic!(
+                    "found yosys in PATH but version probe failed with status {}:\nstdout:\n{}\nstderr:\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => None,
+        Err(err) => panic!("failed to probe yosys in PATH: {}", err),
+    }
+}
+
+const YOWASP_PIP_PACKAGE: &str = "yowasp-yosys==0.57.0.0.post986";
+const YOWASP_LAUNCHER: &str =
+    "import sys, yowasp_yosys; sys.exit(yowasp_yosys.run_yosys(sys.argv[1:]))";
+
+fn install_yowasp_yosys() -> YosysCommand {
+    let python = python_command();
+
+    match Command::new(&python)
+        .arg("-c")
+        .arg("import yowasp_yosys")
+        .output()
+    {
+        Ok(output) if output.status.success() => return yowasp_command(python),
+        Ok(_) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            panic!(
+                "python interpreter `{}` not found while attempting to install Yosys",
+                python.display()
+            );
+        }
+        Err(err) => {
+            panic!(
+                "failed to invoke `{}` for yowasp-yosys availability check: {}",
+                python.display(),
+                err
+            );
+        }
+    }
+
+    let pip_output = Command::new(&python)
+        .args([
+            "-m",
+            "pip",
+            "install",
+            "--quiet",
+            "--disable-pip-version-check",
+            YOWASP_PIP_PACKAGE,
+        ])
+        .output()
+        .unwrap_or_else(|err| {
+            panic!(
+                "failed to invoke `{}` to install {YOWASP_PIP_PACKAGE}: {}",
+                python.display(),
+                err
+            )
+        });
+
+    if !pip_output.status.success() {
+        panic!(
+            "pip failed to install {YOWASP_PIP_PACKAGE} (status {}):\nstdout:\n{}\nstderr:\n{}\nInstall yosys manually and make it available via PATH or YOSYS_CMD.",
+            pip_output.status,
+            String::from_utf8_lossy(&pip_output.stdout),
+            String::from_utf8_lossy(&pip_output.stderr)
+        );
+    }
+
+    let verify_output = Command::new(&python)
+        .arg("-c")
+        .arg("import yowasp_yosys")
+        .output()
+        .unwrap_or_else(|err| {
+            panic!(
+                "failed to invoke `{}` after installing yowasp-yosys: {}",
+                python.display(),
+                err
+            )
+        });
+
+    if !verify_output.status.success() {
+        panic!(
+            "python `{}` could not import yowasp_yosys even after installation:\nstdout:\n{}\nstderr:\n{}",
+            python.display(),
+            String::from_utf8_lossy(&verify_output.stdout),
+            String::from_utf8_lossy(&verify_output.stderr)
+        );
+    }
+
+    yowasp_command(python)
+}
+
+fn python_command() -> PathBuf {
+    std::env::var_os("PYTHON3")
+        .or_else(|| std::env::var_os("PYTHON"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("python3"))
+}
+
+fn yowasp_command(python: PathBuf) -> YosysCommand {
+    YosysCommand {
+        program: python,
+        args: vec![OsString::from("-c"), OsString::from(YOWASP_LAUNCHER)],
+    }
+}
+
 fn run_yosys(script: &Path) {
-    let output = Command::new("yosys")
+    let command = ensure_yosys();
+    let mut process = Command::new(&command.program);
+    process.args(&command.args);
+    let output = process
         .arg("-q")
         .arg("-s")
         .arg(script)
