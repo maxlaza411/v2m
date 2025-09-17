@@ -1171,6 +1171,7 @@ dependencies = [
  "tempfile",
  "v2m-evaluator",
  "v2m-formats",
+ "v2m-nir",
 ]
 
 [[package]]

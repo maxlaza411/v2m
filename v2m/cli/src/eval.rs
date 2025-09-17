@@ -18,11 +18,11 @@ use v2m_formats::nir::{Module, PortDirection};
 #[derive(ClapArgs, Debug, Clone)]
 pub struct NirEvalArgs {
     /// Path to the NIR design to evaluate
-    #[arg(long, value_name = "PATH")]
+    #[arg(value_name = "NIR")]
     pub nir: PathBuf,
 
     /// Stimulus input file (json:path or bin:path)
-    #[arg(long, value_name = "SPEC")]
+    #[arg(long = "vec", alias = "inputs", value_name = "SPEC")]
     pub inputs: Option<FormatPath>,
 
     /// Number of stimulus vectors per cycle

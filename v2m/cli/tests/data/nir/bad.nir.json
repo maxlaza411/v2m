@@ -1,0 +1,18 @@
+{
+  "v": "nir-1.1",
+  "design": "bad",
+  "top": "bad",
+  "modules": {
+    "bad": {
+      "ports": {
+        "a": { "dir": "input", "bits": 1 },
+        "y": { "dir": "output", "bits": 1 }
+      },
+      "nets": {
+        "a": { "bits": 1 },
+        "y": { "bits": 1 }
+      },
+      "nodes": {}
+    }
+  }
+}

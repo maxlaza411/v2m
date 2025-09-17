@@ -22,6 +22,7 @@ rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 v2m-formats = { path = "../core/formats" }
+v2m-nir = { path = "../core/nir" }
 v2m-evaluator = { path = "../evaluator" }
 
 [dev-dependencies]
