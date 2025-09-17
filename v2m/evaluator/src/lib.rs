@@ -1,105 +1,32 @@
-use std::collections::{BTreeMap, HashMap};
-use std::ptr;
+use std::collections::HashMap;
 
 use num_bigint::BigUint;
-use num_traits::{Num, Zero};
-use serde_json::Value;
-
 use thiserror::Error;
-use v2m_formats::nir::{BitRef, Module, Nir, NodeOp, PortDirection};
+use v2m_formats::nir::{Module, Nir, NodeOp, PortDirection};
 use v2m_nir::{BuildError as GraphBuildError, EvalOrderError, ModuleGraph, NetId, NodeId};
 
+mod comb;
+mod packed;
 mod pin_binding;
+mod ports;
+mod reset;
 
-use pin_binding::{
-    bind_bitref, BitBinding, ConstId, ConstPool, PinBindingError, SignalId, LANE_BITS,
+pub use packed::{div_ceil, Packed, PackedBitMask, PackedError, PackedIndex};
+pub use ports::PortValueError;
+
+use comb::{
+    build_comb_kernels, ArithKernel, BinaryKernel, BitSource, MuxKernel, NodeKernel,
+    NodePinBindings, SegmentSource, TransferKernel, UnaryKernel,
 };
-
-const WORD_BITS: usize = 64;
-
-#[inline]
-fn div_ceil(value: usize, divisor: usize) -> usize {
-    debug_assert!(divisor > 0);
-    if value == 0 {
-        0
-    } else {
-        1 + (value - 1) / divisor
-    }
-}
-
-#[inline]
-fn lanes_for_width(width_bits: usize) -> usize {
-    width_bits
-}
-
-#[inline]
-fn words_for_vectors(num_vectors: usize) -> usize {
-    div_ceil(num_vectors, WORD_BITS)
-}
+use packed::mask_for_word;
+use pin_binding::{bind_bitref, BitBinding, ConstPool, PinBindingError, SignalId, LANE_BITS};
+use ports::{pack_port_biguints, unpack_port_biguints};
+use reset::{apply_register_init_bits, parse_init_bits, parse_reset_kind, ResetKind};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SimOptions {
     pub allow_x: bool,
     pub async_reset_is_high: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Packed {
-    num_vectors: usize,
-    words_per_lane: usize,
-    storage: Vec<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PackedIndex {
-    offset: usize,
-    lanes: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackedBitMask {
-    words: Vec<u64>,
-}
-
-#[derive(Debug, Error)]
-pub enum PackedError {
-    #[error(
-        "packed buffers must have the same shape (lanes {expected_lanes}x{expected_words}, got {actual_lanes}x{actual_words})"
-    )]
-    ShapeMismatch {
-        expected_lanes: usize,
-        expected_words: usize,
-        actual_lanes: usize,
-        actual_words: usize,
-    },
-}
-
-#[derive(Debug, Error)]
-pub enum PortValueError {
-    #[error("missing data for port `{name}`")]
-    MissingPort { name: String },
-    #[error("unexpected port `{name}`")]
-    UnexpectedPort { name: String },
-    #[error("port `{name}` expects {expected} vectors, got {actual}")]
-    VectorCountMismatch {
-        name: String,
-        expected: usize,
-        actual: usize,
-    },
-    #[error("value for port `{name}` vector {vector} exceeds width {width_bits} bits")]
-    ValueTooWide {
-        name: String,
-        width_bits: usize,
-        vector: usize,
-    },
-    #[error("packed buffer expects {expected} vectors, got {actual}")]
-    PackedVectorMismatch { expected: usize, actual: usize },
-    #[error("packed buffer words-per-lane mismatch (expected {expected}, got {actual})")]
-    WordsPerLaneMismatch { expected: usize, actual: usize },
-    #[error("packed buffer layout mismatch for port `{name}`")]
-    PackedLayoutMismatch { name: String },
-    #[error("port `{name}` has unsupported direction `{actual:?}` for this operation")]
-    DirectionMismatch { name: String, actual: PortDirection },
 }
 
 #[derive(Debug, Error)]
@@ -153,370 +80,6 @@ pub struct Evaluator<'nir> {
     carry_scratch: Vec<u64>,
 }
 
-impl Packed {
-    pub fn new(num_vectors: usize) -> Self {
-        Self {
-            num_vectors,
-            words_per_lane: words_for_vectors(num_vectors),
-            storage: Vec::new(),
-        }
-    }
-
-    #[inline]
-    pub fn num_vectors(&self) -> usize {
-        self.num_vectors
-    }
-
-    #[inline]
-    pub fn words_per_lane(&self) -> usize {
-        self.words_per_lane
-    }
-
-    #[inline]
-    pub fn total_lanes(&self) -> usize {
-        if self.words_per_lane == 0 {
-            0
-        } else {
-            self.storage.len() / self.words_per_lane
-        }
-    }
-
-    pub fn allocate(&mut self, width_bits: usize) -> PackedIndex {
-        let lanes = lanes_for_width(width_bits);
-        let offset = self.storage.len();
-        self.storage.resize(offset + lanes * self.words_per_lane, 0);
-        PackedIndex { offset, lanes }
-    }
-
-    pub fn duplicate_layout(&self) -> Self {
-        Self {
-            num_vectors: self.num_vectors,
-            words_per_lane: self.words_per_lane,
-            storage: vec![0; self.storage.len()],
-        }
-    }
-
-    #[inline]
-    fn lane_offset(&self, index: PackedIndex, lane: usize) -> usize {
-        debug_assert!(lane < index.lanes);
-        index.offset + lane * self.words_per_lane
-    }
-
-    pub fn lane(&self, index: PackedIndex, lane: usize) -> &[u64] {
-        let start = self.lane_offset(index, lane);
-        let end = start + self.words_per_lane;
-        &self.storage[start..end]
-    }
-
-    pub fn lane_mut(&mut self, index: PackedIndex, lane: usize) -> &mut [u64] {
-        let start = self.lane_offset(index, lane);
-        let end = start + self.words_per_lane;
-        &mut self.storage[start..end]
-    }
-
-    #[inline]
-    pub fn slice(&self, index: PackedIndex) -> &[u64] {
-        let end = index.offset + index.lanes * self.words_per_lane;
-        &self.storage[index.offset..end]
-    }
-
-    #[inline]
-    pub fn slice_mut(&mut self, index: PackedIndex) -> &mut [u64] {
-        let end = index.offset + index.lanes * self.words_per_lane;
-        &mut self.storage[index.offset..end]
-    }
-
-    pub fn copy_from(&mut self, other: &Packed) -> Result<(), PackedError> {
-        if self.words_per_lane != other.words_per_lane || self.storage.len() != other.storage.len()
-        {
-            return Err(PackedError::ShapeMismatch {
-                expected_lanes: self.total_lanes(),
-                expected_words: self.words_per_lane,
-                actual_lanes: other.total_lanes(),
-                actual_words: other.words_per_lane,
-            });
-        }
-
-        self.storage.copy_from_slice(&other.storage);
-        Ok(())
-    }
-}
-
-impl PackedIndex {
-    #[inline]
-    pub fn offset(&self) -> usize {
-        self.offset
-    }
-
-    #[inline]
-    pub fn lanes(&self) -> usize {
-        self.lanes
-    }
-
-    #[inline]
-    pub fn lane_offset(&self, lane: usize, words_per_lane: usize) -> usize {
-        debug_assert!(lane < self.lanes);
-        self.offset + lane * words_per_lane
-    }
-
-    #[inline]
-    pub fn word_offset(&self, lane: usize, word: usize, words_per_lane: usize) -> usize {
-        debug_assert!(words_per_lane > 0);
-        debug_assert!(word < words_per_lane);
-        self.lane_offset(lane, words_per_lane) + word
-    }
-}
-
-impl PackedBitMask {
-    pub fn new(num_vectors: usize) -> Self {
-        Self {
-            words: vec![0; words_for_vectors(num_vectors)],
-        }
-    }
-
-    #[inline]
-    pub fn words(&self) -> &[u64] {
-        &self.words
-    }
-
-    #[inline]
-    pub fn words_mut(&mut self) -> &mut [u64] {
-        &mut self.words
-    }
-}
-
-fn pack_port_biguints(
-    target: &mut Packed,
-    index: PackedIndex,
-    width_bits: usize,
-    values: &[BigUint],
-    name: &str,
-) -> Result<(), PortValueError> {
-    if width_bits > index.lanes() {
-        return Err(PortValueError::PackedLayoutMismatch {
-            name: name.to_string(),
-        });
-    }
-
-    if values.len() != target.num_vectors() {
-        return Err(PortValueError::VectorCountMismatch {
-            name: name.to_string(),
-            expected: target.num_vectors(),
-            actual: values.len(),
-        });
-    }
-
-    let words_per_lane = target.words_per_lane();
-    let slice = target.slice_mut(index);
-    slice.fill(0);
-
-    if width_bits == 0 {
-        for (vec_idx, value) in values.iter().enumerate() {
-            if !value.is_zero() {
-                return Err(PortValueError::ValueTooWide {
-                    name: name.to_string(),
-                    width_bits,
-                    vector: vec_idx,
-                });
-            }
-        }
-        return Ok(());
-    }
-
-    for (vec_idx, value) in values.iter().enumerate() {
-        if value.bits() > width_bits as u64 {
-            return Err(PortValueError::ValueTooWide {
-                name: name.to_string(),
-                width_bits,
-                vector: vec_idx,
-            });
-        }
-
-        if value.is_zero() {
-            continue;
-        }
-
-        let word_idx = vec_idx / WORD_BITS;
-        let bit_in_word = vec_idx % WORD_BITS;
-        let bit_mask = 1u64 << bit_in_word;
-
-        for (chunk_idx, mut chunk) in value.to_u64_digits().into_iter().enumerate() {
-            if chunk == 0 {
-                continue;
-            }
-
-            let base_lane = chunk_idx * WORD_BITS;
-            while chunk != 0 {
-                let bit = chunk.trailing_zeros() as usize;
-                let lane = base_lane + bit;
-                if lane >= width_bits {
-                    break;
-                }
-
-                let offset = index.offset + lane * words_per_lane + word_idx;
-                target.storage[offset] |= bit_mask;
-                chunk &= chunk - 1;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn unpack_port_biguints(
-    source: &Packed,
-    index: PackedIndex,
-    width_bits: usize,
-    name: &str,
-) -> Result<Vec<BigUint>, PortValueError> {
-    if width_bits > index.lanes() {
-        return Err(PortValueError::PackedLayoutMismatch {
-            name: name.to_string(),
-        });
-    }
-
-    let words_per_lane = source.words_per_lane();
-    let end = index.offset + index.lanes() * words_per_lane;
-    if end > source.storage.len() {
-        return Err(PortValueError::PackedLayoutMismatch {
-            name: name.to_string(),
-        });
-    }
-
-    let num_vectors = source.num_vectors();
-    let mut result = vec![BigUint::default(); num_vectors];
-
-    if width_bits == 0 {
-        return Ok(result);
-    }
-
-    let slice = source.slice(index);
-    for lane in 0..width_bits {
-        let lane_offset = lane * words_per_lane;
-        for word_idx in 0..words_per_lane {
-            let word = slice[lane_offset + word_idx];
-            if word == 0 {
-                continue;
-            }
-
-            let base_vector = word_idx * WORD_BITS;
-            let mut mask = word;
-            while mask != 0 {
-                let bit = mask.trailing_zeros() as usize;
-                let vector_idx = base_vector + bit;
-                if vector_idx >= num_vectors {
-                    break;
-                }
-
-                result[vector_idx].set_bit(lane as u64, true);
-                mask &= mask - 1;
-            }
-        }
-    }
-
-    Ok(result)
-}
-
-#[derive(Default)]
-struct NodePinBindings {
-    pins: BTreeMap<String, BitBinding>,
-}
-
-#[derive(Clone, Debug)]
-struct UnaryKernel {
-    input: PackedIndex,
-    output: PackedIndex,
-}
-
-#[derive(Clone, Debug)]
-struct BinaryKernel {
-    input_a: PackedIndex,
-    input_b: PackedIndex,
-    output: PackedIndex,
-}
-
-#[derive(Clone, Debug)]
-struct MuxKernel {
-    input_a: PackedIndex,
-    input_b: PackedIndex,
-    select: PackedIndex,
-    output: PackedIndex,
-    select_masks: Vec<u64>,
-}
-
-#[derive(Clone, Debug)]
-struct TransferSegment {
-    dest_offset: usize,
-    lanes: usize,
-    source: SegmentSource,
-}
-
-#[derive(Clone, Debug)]
-enum SegmentSource {
-    Net { offset: usize },
-    Const { words: Vec<u64> },
-}
-
-#[derive(Clone, Debug)]
-struct TransferKernel {
-    plan: Vec<TransferSegment>,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum BitSource {
-    Net { offset: usize },
-    Const { value: bool },
-}
-
-#[derive(Clone, Debug)]
-struct ArithBit {
-    a: BitSource,
-    b: BitSource,
-    dest_offset: usize,
-}
-
-#[derive(Clone, Debug)]
-struct ArithKernel {
-    bits: Vec<ArithBit>,
-    invert_b: bool,
-    initial_carry: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum PackedSourceKind {
-    Net(NetId, usize),
-    Const(ConstId, usize),
-    Literal(bool),
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PackedDestination {
-    net: NetId,
-    lane: usize,
-}
-
-#[derive(Clone, Debug)]
-enum NodeKernel {
-    Const(TransferKernel),
-    Not(UnaryKernel),
-    And(BinaryKernel),
-    Or(BinaryKernel),
-    Xor(BinaryKernel),
-    Xnor(BinaryKernel),
-    Mux(MuxKernel),
-    Slice(TransferKernel),
-    Cat(TransferKernel),
-    Add(ArithKernel),
-    Sub(ArithKernel),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResetKind {
-    None,
-    Sync,
-    Async,
-}
-
 #[derive(Clone, Debug)]
 struct DffInfo {
     reg_index: PackedIndex,
@@ -525,234 +88,10 @@ struct DffInfo {
     reset_kind: ResetKind,
 }
 
-fn bitref_full_net<'a>(bitref: &'a BitRef, expected_width: u32) -> Option<&'a str> {
-    match bitref {
-        BitRef::Net(net) if net.lsb == 0 && net.msb >= net.lsb => {
-            let width = net.msb - net.lsb + 1;
-            if width == expected_width {
-                Some(net.net.as_str())
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-fn mask_for_word(word_index: usize, words_per_lane: usize, num_vectors: usize) -> u64 {
-    if words_per_lane == 0 {
-        return 0;
-    }
-
-    if word_index + 1 < words_per_lane {
-        return u64::MAX;
-    }
-
-    let remainder = num_vectors % WORD_BITS;
-    if remainder == 0 {
-        if num_vectors == 0 {
-            0
-        } else {
-            u64::MAX
-        }
-    } else {
-        (1u64 << remainder) - 1
-    }
-}
-
-fn reset_kind_from_str(kind: &str) -> Option<ResetKind> {
-    if kind.eq_ignore_ascii_case("sync") {
-        Some(ResetKind::Sync)
-    } else if kind.eq_ignore_ascii_case("async") {
-        Some(ResetKind::Async)
-    } else if kind.eq_ignore_ascii_case("none") || kind.eq_ignore_ascii_case("disabled") {
-        Some(ResetKind::None)
-    } else {
-        None
-    }
-}
-
-fn reset_kind_from_value(value: &Value) -> Option<ResetKind> {
-    match value {
-        Value::String(kind) => reset_kind_from_str(kind),
-        Value::Bool(flag) => Some(if *flag {
-            ResetKind::Async
-        } else {
-            ResetKind::Sync
-        }),
-        Value::Object(map) => {
-            if let Some(kind_value) = map.get("kind") {
-                reset_kind_from_value(kind_value)
-            } else if let Some(kind_value) = map.get("type") {
-                reset_kind_from_value(kind_value)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-fn parse_reset_kind(node: &v2m_formats::nir::Node) -> ResetKind {
-    if let Some(attrs) = &node.attrs {
-        if let Some(kind_value) = attrs.get("reset_kind") {
-            if let Some(kind) = reset_kind_from_value(kind_value) {
-                return kind;
-            }
-        }
-
-        if let Some(reset_value) = attrs.get("reset") {
-            if let Some(kind) = reset_kind_from_value(reset_value) {
-                return kind;
-            }
-        }
-
-        if let Some(flag) = attrs.get("async_reset").and_then(Value::as_bool) {
-            return if flag {
-                ResetKind::Async
-            } else {
-                ResetKind::Sync
-            };
-        }
-    }
-
-    ResetKind::Sync
-}
-
-fn parse_biguint_string(value: &str) -> Option<BigUint> {
-    let cleaned: String = value.chars().filter(|ch| *ch != '_').collect();
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        return Some(BigUint::zero());
-    }
-
-    let (radix, digits) = if let Some(rest) = trimmed.strip_prefix("0x") {
-        (16, rest)
-    } else if let Some(rest) = trimmed.strip_prefix("0X") {
-        (16, rest)
-    } else if let Some(rest) = trimmed.strip_prefix("0b") {
-        (2, rest)
-    } else if let Some(rest) = trimmed.strip_prefix("0B") {
-        (2, rest)
-    } else if let Some(rest) = trimmed.strip_prefix("0o") {
-        (8, rest)
-    } else if let Some(rest) = trimmed.strip_prefix("0O") {
-        (8, rest)
-    } else {
-        (10, trimmed)
-    };
-
-    let digits = digits.trim_start_matches('+');
-    if digits.is_empty() {
-        return Some(BigUint::zero());
-    }
-
-    BigUint::from_str_radix(digits, radix).ok()
-}
-
-fn biguint_to_bits(value: &BigUint, width: usize) -> Vec<bool> {
-    let mut bits = vec![false; width];
-    let digits = value.to_u64_digits();
-    for bit in 0..width {
-        let word_index = bit / 64;
-        let bit_index = bit % 64;
-        if let Some(word) = digits.get(word_index) {
-            bits[bit] = ((*word >> bit_index) & 1) != 0;
-        }
-    }
-    bits
-}
-
-fn parse_init_bits_value(value: &Value, width: usize) -> Option<Vec<bool>> {
-    match value {
-        Value::String(text) => parse_biguint_string(text).map(|big| biguint_to_bits(&big, width)),
-        Value::Number(number) => number
-            .as_u64()
-            .map(|raw| biguint_to_bits(&BigUint::from(raw), width)),
-        Value::Bool(flag) => {
-            let big = if *flag {
-                BigUint::from(1u8)
-            } else {
-                BigUint::zero()
-            };
-            Some(biguint_to_bits(&big, width))
-        }
-        Value::Object(map) => {
-            if let Some(inner) = map.get("init") {
-                return parse_init_bits_value(inner, width);
-            }
-            if let Some(inner) = map.get("value") {
-                return parse_init_bits_value(inner, width);
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-fn parse_init_bits(node: &v2m_formats::nir::Node) -> Vec<bool> {
-    let width = node.width as usize;
-    if width == 0 {
-        return Vec::new();
-    }
-
-    if let Some(attrs) = &node.attrs {
-        if let Some(bits) = attrs
-            .get("init")
-            .and_then(|value| parse_init_bits_value(value, width))
-        {
-            return bits;
-        }
-
-        if let Some(reset_value) = attrs.get("reset") {
-            if let Some(bits) = parse_init_bits_value(reset_value, width) {
-                return bits;
-            }
-
-            if let Value::Object(map) = reset_value {
-                if let Some(bits) = map
-                    .get("init")
-                    .and_then(|value| parse_init_bits_value(value, width))
-                    .or_else(|| {
-                        map.get("value")
-                            .and_then(|value| parse_init_bits_value(value, width))
-                    })
-                {
-                    return bits;
-                }
-            }
-        }
-    }
-
-    vec![false; width]
-}
-
-fn apply_register_init_bits(
-    packed: &mut Packed,
-    index: PackedIndex,
-    bits: &[bool],
-    num_vectors: usize,
-) {
-    let words_per_lane = packed.words_per_lane();
-    if words_per_lane == 0 {
-        return;
-    }
-
-    for (lane, bit) in bits.iter().copied().enumerate().take(index.lanes()) {
-        let lane_words = packed.lane_mut(index, lane);
-        if bit {
-            for word_idx in 0..words_per_lane {
-                lane_words[word_idx] = mask_for_word(word_idx, words_per_lane, num_vectors);
-            }
-        } else {
-            lane_words.fill(0);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_traits::Num;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use std::collections::{BTreeMap, HashMap};
     use v2m_formats::nir::Port;
@@ -2830,7 +2169,7 @@ impl<'nir> Evaluator<'nir> {
         }
 
         let words_per_lane = nets.words_per_lane();
-        let comb_kernels = Self::build_comb_kernels(
+        let comb_kernels = build_comb_kernels(
             module,
             &graph,
             &net_indices,
@@ -3174,6 +2513,8 @@ impl<'nir> Evaluator<'nir> {
         }
 
         let base = index.offset();
+        let regs_init_storage = self.regs_init.storage();
+        let regs_cur_storage = self.regs_cur.storage_mut();
         for lane in 0..index.lanes() {
             let lane_offset = base + lane * words_per_lane;
             for word_idx in 0..words_per_lane {
@@ -3184,9 +2525,9 @@ impl<'nir> Evaluator<'nir> {
                 }
 
                 let word_index = lane_offset + word_idx;
-                let current = self.regs_cur.storage[word_index];
-                let init_word = self.regs_init.storage[word_index];
-                self.regs_cur.storage[word_index] = (current & !mask) | (init_word & mask);
+                let current = regs_cur_storage[word_index];
+                let init_word = regs_init_storage[word_index];
+                regs_cur_storage[word_index] = (current & !mask) | (init_word & mask);
             }
         }
     }
@@ -3213,6 +2554,7 @@ impl<'nir> Evaluator<'nir> {
             return;
         }
 
+        let storage = self.nets.storage_mut();
         for segment in &kernel.plan {
             let len = segment.lanes * words_per_lane;
             if len == 0 {
@@ -3222,16 +2564,11 @@ impl<'nir> Evaluator<'nir> {
             match &segment.source {
                 SegmentSource::Net { offset } => {
                     let src_start = *offset;
-                    unsafe {
-                        let src_ptr = self.nets.storage.as_ptr().add(src_start);
-                        let dest_ptr = self.nets.storage.as_mut_ptr().add(dest_start);
-                        ptr::copy(src_ptr, dest_ptr, len);
-                    }
+                    storage.copy_within(src_start..src_start + len, dest_start);
                 }
                 SegmentSource::Const { words } => {
                     let dest_end = dest_start + len;
-                    let dest_slice = &mut self.nets.storage[dest_start..dest_end];
-                    dest_slice.copy_from_slice(words);
+                    storage[dest_start..dest_end].copy_from_slice(words);
                 }
             }
         }
@@ -3243,16 +2580,17 @@ impl<'nir> Evaluator<'nir> {
             return;
         }
 
-        debug_assert_eq!(kernel.input.lanes, kernel.output.lanes);
+        debug_assert_eq!(kernel.input.lanes(), kernel.output.lanes());
 
-        for lane in 0..kernel.output.lanes {
+        let storage = self.nets.storage_mut();
+        for lane in 0..kernel.output.lanes() {
             let input_base = kernel.input.lane_offset(lane, words_per_lane);
             let output_base = kernel.output.lane_offset(lane, words_per_lane);
 
             for word_idx in 0..words_per_lane {
                 let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
-                let input_word = self.nets.storage[input_base + word_idx];
-                self.nets.storage[output_base + word_idx] = (!input_word) & mask;
+                let input_word = storage[input_base + word_idx];
+                storage[output_base + word_idx] = (!input_word) & mask;
             }
         }
     }
@@ -3263,20 +2601,20 @@ impl<'nir> Evaluator<'nir> {
             return;
         }
 
-        debug_assert_eq!(kernel.input_a.lanes, kernel.output.lanes);
-        debug_assert_eq!(kernel.input_b.lanes, kernel.output.lanes);
+        debug_assert_eq!(kernel.input_a.lanes(), kernel.output.lanes());
+        debug_assert_eq!(kernel.input_b.lanes(), kernel.output.lanes());
 
-        for lane in 0..kernel.output.lanes {
+        let storage = self.nets.storage_mut();
+        for lane in 0..kernel.output.lanes() {
             let input_a_base = kernel.input_a.lane_offset(lane, words_per_lane);
             let input_b_base = kernel.input_b.lane_offset(lane, words_per_lane);
             let output_base = kernel.output.lane_offset(lane, words_per_lane);
 
             for word_idx in 0..words_per_lane {
                 let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
-                let value = (self.nets.storage[input_a_base + word_idx]
-                    & self.nets.storage[input_b_base + word_idx])
-                    & mask;
-                self.nets.storage[output_base + word_idx] = value;
+                let value =
+                    (storage[input_a_base + word_idx] & storage[input_b_base + word_idx]) & mask;
+                storage[output_base + word_idx] = value;
             }
         }
     }
@@ -3287,20 +2625,20 @@ impl<'nir> Evaluator<'nir> {
             return;
         }
 
-        debug_assert_eq!(kernel.input_a.lanes, kernel.output.lanes);
-        debug_assert_eq!(kernel.input_b.lanes, kernel.output.lanes);
+        debug_assert_eq!(kernel.input_a.lanes(), kernel.output.lanes());
+        debug_assert_eq!(kernel.input_b.lanes(), kernel.output.lanes());
 
-        for lane in 0..kernel.output.lanes {
+        let storage = self.nets.storage_mut();
+        for lane in 0..kernel.output.lanes() {
             let input_a_base = kernel.input_a.lane_offset(lane, words_per_lane);
             let input_b_base = kernel.input_b.lane_offset(lane, words_per_lane);
             let output_base = kernel.output.lane_offset(lane, words_per_lane);
 
             for word_idx in 0..words_per_lane {
                 let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
-                let value = (self.nets.storage[input_a_base + word_idx]
-                    | self.nets.storage[input_b_base + word_idx])
-                    & mask;
-                self.nets.storage[output_base + word_idx] = value;
+                let value =
+                    (storage[input_a_base + word_idx] | storage[input_b_base + word_idx]) & mask;
+                storage[output_base + word_idx] = value;
             }
         }
     }
@@ -3311,20 +2649,20 @@ impl<'nir> Evaluator<'nir> {
             return;
         }
 
-        debug_assert_eq!(kernel.input_a.lanes, kernel.output.lanes);
-        debug_assert_eq!(kernel.input_b.lanes, kernel.output.lanes);
+        debug_assert_eq!(kernel.input_a.lanes(), kernel.output.lanes());
+        debug_assert_eq!(kernel.input_b.lanes(), kernel.output.lanes());
 
-        for lane in 0..kernel.output.lanes {
+        let storage = self.nets.storage_mut();
+        for lane in 0..kernel.output.lanes() {
             let input_a_base = kernel.input_a.lane_offset(lane, words_per_lane);
             let input_b_base = kernel.input_b.lane_offset(lane, words_per_lane);
             let output_base = kernel.output.lane_offset(lane, words_per_lane);
 
             for word_idx in 0..words_per_lane {
                 let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
-                let value = (self.nets.storage[input_a_base + word_idx]
-                    ^ self.nets.storage[input_b_base + word_idx])
-                    & mask;
-                self.nets.storage[output_base + word_idx] = value;
+                let value =
+                    (storage[input_a_base + word_idx] ^ storage[input_b_base + word_idx]) & mask;
+                storage[output_base + word_idx] = value;
             }
         }
     }
@@ -3335,20 +2673,20 @@ impl<'nir> Evaluator<'nir> {
             return;
         }
 
-        debug_assert_eq!(kernel.input_a.lanes, kernel.output.lanes);
-        debug_assert_eq!(kernel.input_b.lanes, kernel.output.lanes);
+        debug_assert_eq!(kernel.input_a.lanes(), kernel.output.lanes());
+        debug_assert_eq!(kernel.input_b.lanes(), kernel.output.lanes());
 
-        for lane in 0..kernel.output.lanes {
+        let storage = self.nets.storage_mut();
+        for lane in 0..kernel.output.lanes() {
             let input_a_base = kernel.input_a.lane_offset(lane, words_per_lane);
             let input_b_base = kernel.input_b.lane_offset(lane, words_per_lane);
             let output_base = kernel.output.lane_offset(lane, words_per_lane);
 
             for word_idx in 0..words_per_lane {
                 let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
-                let value = (!(self.nets.storage[input_a_base + word_idx]
-                    ^ self.nets.storage[input_b_base + word_idx]))
-                    & mask;
-                self.nets.storage[output_base + word_idx] = value;
+                let value =
+                    (!(storage[input_a_base + word_idx] ^ storage[input_b_base + word_idx])) & mask;
+                storage[output_base + word_idx] = value;
             }
         }
     }
@@ -3394,11 +2732,12 @@ impl<'nir> Evaluator<'nir> {
             }
         }
 
+        let storage = self.nets.storage_mut();
         for bit in &kernel.bits {
             for word_idx in 0..words_per_lane {
                 let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
                 let a_word = match bit.a {
-                    BitSource::Net { offset } => self.nets.storage[offset + word_idx],
+                    BitSource::Net { offset } => storage[offset + word_idx],
                     BitSource::Const { value } => {
                         if value {
                             mask
@@ -3408,7 +2747,7 @@ impl<'nir> Evaluator<'nir> {
                     }
                 };
                 let mut b_word = match bit.b {
-                    BitSource::Net { offset } => self.nets.storage[offset + word_idx],
+                    BitSource::Net { offset } => storage[offset + word_idx],
                     BitSource::Const { value } => {
                         if value {
                             mask
@@ -3426,609 +2765,10 @@ impl<'nir> Evaluator<'nir> {
                 let sum = (a_word ^ b_word) ^ carry_in;
                 let carry_out = (a_word & b_word) | (a_word & carry_in) | (b_word & carry_in);
 
-                self.nets.storage[bit.dest_offset + word_idx] = sum & mask;
+                storage[bit.dest_offset + word_idx] = sum & mask;
                 self.carry_scratch[word_idx] = carry_out & mask;
             }
         }
-    }
-
-    fn build_comb_kernels(
-        module: &'nir Module,
-        graph: &ModuleGraph,
-        net_indices: &HashMap<String, PackedIndex>,
-        net_indices_by_id: &HashMap<NetId, PackedIndex>,
-        node_bindings: &HashMap<NodeId, NodePinBindings>,
-        const_pool: &ConstPool,
-        words_per_lane: usize,
-        num_vectors: usize,
-    ) -> HashMap<NodeId, NodeKernel> {
-        let mut kernels = HashMap::new();
-
-        for (name, node) in &module.nodes {
-            if matches!(node.op, NodeOp::Dff | NodeOp::Latch) {
-                continue;
-            }
-
-            let node_id = graph
-                .node_id(name.as_str())
-                .expect("module node must exist in graph");
-
-            let kernel = match node.op {
-                NodeOp::Const => node_bindings
-                    .get(&node_id)
-                    .and_then(|bindings| {
-                        Self::build_const_kernel(
-                            node,
-                            bindings,
-                            net_indices_by_id,
-                            const_pool,
-                            words_per_lane,
-                            num_vectors,
-                        )
-                    })
-                    .map(NodeKernel::Const),
-                NodeOp::Slice => node_bindings
-                    .get(&node_id)
-                    .and_then(|bindings| {
-                        Self::build_copy_kernel(
-                            bindings,
-                            net_indices_by_id,
-                            const_pool,
-                            words_per_lane,
-                            num_vectors,
-                        )
-                    })
-                    .map(NodeKernel::Slice),
-                NodeOp::Cat => node_bindings
-                    .get(&node_id)
-                    .and_then(|bindings| {
-                        Self::build_copy_kernel(
-                            bindings,
-                            net_indices_by_id,
-                            const_pool,
-                            words_per_lane,
-                            num_vectors,
-                        )
-                    })
-                    .map(NodeKernel::Cat),
-                NodeOp::Add => node_bindings
-                    .get(&node_id)
-                    .and_then(|bindings| {
-                        Self::build_arith_kernel(
-                            bindings,
-                            net_indices_by_id,
-                            const_pool,
-                            words_per_lane,
-                            false,
-                            false,
-                        )
-                    })
-                    .map(NodeKernel::Add),
-                NodeOp::Sub => node_bindings
-                    .get(&node_id)
-                    .and_then(|bindings| {
-                        Self::build_arith_kernel(
-                            bindings,
-                            net_indices_by_id,
-                            const_pool,
-                            words_per_lane,
-                            true,
-                            true,
-                        )
-                    })
-                    .map(NodeKernel::Sub),
-                NodeOp::Not => Self::build_not_kernel(node, net_indices).map(NodeKernel::Not),
-                NodeOp::And => Self::build_and_kernel(node, net_indices).map(NodeKernel::And),
-                NodeOp::Or => Self::build_or_kernel(node, net_indices).map(NodeKernel::Or),
-                NodeOp::Xor => Self::build_xor_kernel(node, net_indices).map(NodeKernel::Xor),
-                NodeOp::Xnor => Self::build_xnor_kernel(node, net_indices).map(NodeKernel::Xnor),
-                NodeOp::Mux => {
-                    Self::build_mux_kernel(node, net_indices, words_per_lane, num_vectors)
-                        .map(NodeKernel::Mux)
-                }
-                _ => None,
-            };
-
-            if let Some(kernel) = kernel {
-                kernels.insert(node_id, kernel);
-            }
-        }
-
-        kernels
-    }
-
-    fn build_const_kernel(
-        node: &v2m_formats::nir::Node,
-        bindings: &NodePinBindings,
-        net_indices_by_id: &HashMap<NetId, PackedIndex>,
-        const_pool: &ConstPool,
-        words_per_lane: usize,
-        num_vectors: usize,
-    ) -> Option<TransferKernel> {
-        let literal = node
-            .params
-            .as_ref()
-            .and_then(|params| params.get("value"))
-            .and_then(|value| value.as_str())?;
-        let bits = Self::parse_const_bits(literal, node.width)?;
-
-        let output_binding = bindings.pins.get("Y")?;
-        let destinations = Self::expand_binding_destinations(output_binding)?;
-        if destinations.len() != bits.len() {
-            return None;
-        }
-
-        let sources: Vec<PackedSourceKind> =
-            bits.into_iter().map(PackedSourceKind::Literal).collect();
-
-        let plan = Self::build_transfer_plan(
-            &sources,
-            &destinations,
-            net_indices_by_id,
-            const_pool,
-            words_per_lane,
-            num_vectors,
-        )?;
-
-        Some(TransferKernel { plan })
-    }
-
-    fn build_copy_kernel(
-        bindings: &NodePinBindings,
-        net_indices_by_id: &HashMap<NetId, PackedIndex>,
-        const_pool: &ConstPool,
-        words_per_lane: usize,
-        num_vectors: usize,
-    ) -> Option<TransferKernel> {
-        let input_binding = bindings.pins.get("A")?;
-        let output_binding = bindings.pins.get("Y")?;
-
-        let sources = Self::expand_binding_sources(input_binding);
-        let destinations = Self::expand_binding_destinations(output_binding)?;
-
-        if sources.len() != destinations.len() {
-            return None;
-        }
-
-        let plan = Self::build_transfer_plan(
-            &sources,
-            &destinations,
-            net_indices_by_id,
-            const_pool,
-            words_per_lane,
-            num_vectors,
-        )?;
-
-        Some(TransferKernel { plan })
-    }
-
-    fn build_arith_kernel(
-        bindings: &NodePinBindings,
-        net_indices_by_id: &HashMap<NetId, PackedIndex>,
-        const_pool: &ConstPool,
-        words_per_lane: usize,
-        invert_b: bool,
-        initial_carry: bool,
-    ) -> Option<ArithKernel> {
-        let input_a = bindings.pins.get("A")?;
-        let input_b = bindings.pins.get("B")?;
-        let output = bindings.pins.get("Y")?;
-
-        let sources_a = Self::expand_binding_sources(input_a);
-        let sources_b = Self::expand_binding_sources(input_b);
-        let destinations = Self::expand_binding_destinations(output)?;
-
-        if destinations.len() != sources_a.len() || destinations.len() != sources_b.len() {
-            return None;
-        }
-
-        if words_per_lane == 0 {
-            return Some(ArithKernel {
-                bits: Vec::new(),
-                invert_b,
-                initial_carry,
-            });
-        }
-
-        let mut bits = Vec::with_capacity(destinations.len());
-        for idx in 0..destinations.len() {
-            let dest = &destinations[idx];
-            let dest_index = *net_indices_by_id.get(&dest.net)?;
-            let dest_offset = dest_index.offset + dest.lane * words_per_lane;
-            let a_source = Self::convert_bit_source(
-                &sources_a[idx],
-                net_indices_by_id,
-                const_pool,
-                words_per_lane,
-            )?;
-            let b_source = Self::convert_bit_source(
-                &sources_b[idx],
-                net_indices_by_id,
-                const_pool,
-                words_per_lane,
-            )?;
-            bits.push(ArithBit {
-                a: a_source,
-                b: b_source,
-                dest_offset,
-            });
-        }
-
-        Some(ArithKernel {
-            bits,
-            invert_b,
-            initial_carry,
-        })
-    }
-
-    fn expand_binding_sources(binding: &BitBinding) -> Vec<PackedSourceKind> {
-        let mut sources = Vec::new();
-        let bits_per_lane = LANE_BITS as usize;
-        for descriptor in binding.descriptors() {
-            let base_lane =
-                descriptor.lane_offset as usize * bits_per_lane + descriptor.bit_offset as usize;
-            for offset in 0..descriptor.width as usize {
-                let lane = base_lane + offset;
-                match descriptor.source {
-                    SignalId::Net(net_id) => {
-                        sources.push(PackedSourceKind::Net(net_id, lane));
-                    }
-                    SignalId::Const(const_id) => {
-                        sources.push(PackedSourceKind::Const(const_id, lane));
-                    }
-                }
-            }
-        }
-        sources
-    }
-
-    fn expand_binding_destinations(binding: &BitBinding) -> Option<Vec<PackedDestination>> {
-        let mut destinations = Vec::new();
-        let bits_per_lane = LANE_BITS as usize;
-        for descriptor in binding.descriptors() {
-            let base_lane =
-                descriptor.lane_offset as usize * bits_per_lane + descriptor.bit_offset as usize;
-            match descriptor.source {
-                SignalId::Net(net_id) => {
-                    for offset in 0..descriptor.width as usize {
-                        destinations.push(PackedDestination {
-                            net: net_id,
-                            lane: base_lane + offset,
-                        });
-                    }
-                }
-                SignalId::Const(_) => return None,
-            }
-        }
-        Some(destinations)
-    }
-
-    fn const_pool_bit(const_pool: &ConstPool, const_id: ConstId, lane: usize) -> bool {
-        let value = const_pool.get(const_id);
-        if lane as u32 >= value.width {
-            return false;
-        }
-        let word_index = lane / LANE_BITS as usize;
-        let bit_index = lane % LANE_BITS as usize;
-        let chunk = value.words.get(word_index).copied().unwrap_or(0);
-        ((chunk >> bit_index) & 1) != 0
-    }
-
-    fn convert_bit_source(
-        source: &PackedSourceKind,
-        net_indices_by_id: &HashMap<NetId, PackedIndex>,
-        const_pool: &ConstPool,
-        words_per_lane: usize,
-    ) -> Option<BitSource> {
-        match source {
-            PackedSourceKind::Net(net_id, lane) => {
-                let index = *net_indices_by_id.get(net_id)?;
-                Some(BitSource::Net {
-                    offset: index.offset + lane * words_per_lane,
-                })
-            }
-            PackedSourceKind::Const(const_id, lane) => Some(BitSource::Const {
-                value: Self::const_pool_bit(const_pool, *const_id, *lane),
-            }),
-            PackedSourceKind::Literal(bit) => Some(BitSource::Const { value: *bit }),
-        }
-    }
-
-    fn build_transfer_plan(
-        sources: &[PackedSourceKind],
-        destinations: &[PackedDestination],
-        net_indices_by_id: &HashMap<NetId, PackedIndex>,
-        const_pool: &ConstPool,
-        words_per_lane: usize,
-        num_vectors: usize,
-    ) -> Option<Vec<TransferSegment>> {
-        if sources.len() != destinations.len() {
-            return None;
-        }
-
-        if words_per_lane == 0 {
-            return Some(Vec::new());
-        }
-
-        #[derive(Debug)]
-        enum PendingSource {
-            Net { offset: usize },
-            Const { bits: Vec<bool> },
-        }
-
-        struct PendingSegment {
-            dest_offset: usize,
-            source: PendingSource,
-            lanes: usize,
-        }
-
-        fn finalize_pending(
-            pending: Option<PendingSegment>,
-            plan: &mut Vec<TransferSegment>,
-            words_per_lane: usize,
-            num_vectors: usize,
-        ) {
-            if let Some(segment) = pending {
-                match segment.source {
-                    PendingSource::Net { offset } => {
-                        plan.push(TransferSegment {
-                            dest_offset: segment.dest_offset,
-                            lanes: segment.lanes,
-                            source: SegmentSource::Net { offset },
-                        });
-                    }
-                    PendingSource::Const { bits } => {
-                        let mut words = Vec::with_capacity(bits.len() * words_per_lane);
-                        if words_per_lane != 0 {
-                            for bit in bits {
-                                for word_idx in 0..words_per_lane {
-                                    let mask = mask_for_word(word_idx, words_per_lane, num_vectors);
-                                    words.push(if bit { mask } else { 0 });
-                                }
-                            }
-                        }
-                        plan.push(TransferSegment {
-                            dest_offset: segment.dest_offset,
-                            lanes: segment.lanes,
-                            source: SegmentSource::Const { words },
-                        });
-                    }
-                }
-            }
-        }
-
-        let mut plan = Vec::new();
-        let mut pending: Option<PendingSegment> = None;
-
-        for (source_kind, dest) in sources.iter().zip(destinations.iter()) {
-            let dest_index = *net_indices_by_id.get(&dest.net)?;
-            let dest_offset = dest_index.offset + dest.lane * words_per_lane;
-            let source = Self::convert_bit_source(
-                source_kind,
-                net_indices_by_id,
-                const_pool,
-                words_per_lane,
-            )?;
-
-            match source {
-                BitSource::Net { offset } => {
-                    if let Some(existing) = pending.as_mut() {
-                        if let PendingSource::Net {
-                            offset: current_offset,
-                        } = &mut existing.source
-                        {
-                            if existing.dest_offset + existing.lanes * words_per_lane == dest_offset
-                                && *current_offset + existing.lanes * words_per_lane == offset
-                            {
-                                existing.lanes += 1;
-                                continue;
-                            }
-                        }
-                    }
-
-                    let to_flush = pending.take();
-                    finalize_pending(to_flush, &mut plan, words_per_lane, num_vectors);
-                    pending = Some(PendingSegment {
-                        dest_offset,
-                        source: PendingSource::Net { offset },
-                        lanes: 1,
-                    });
-                }
-                BitSource::Const { value } => {
-                    if let Some(existing) = pending.as_mut() {
-                        if let PendingSource::Const { bits } = &mut existing.source {
-                            if existing.dest_offset + existing.lanes * words_per_lane == dest_offset
-                            {
-                                bits.push(value);
-                                existing.lanes += 1;
-                                continue;
-                            }
-                        }
-                    }
-
-                    let to_flush = pending.take();
-                    finalize_pending(to_flush, &mut plan, words_per_lane, num_vectors);
-                    pending = Some(PendingSegment {
-                        dest_offset,
-                        source: PendingSource::Const { bits: vec![value] },
-                        lanes: 1,
-                    });
-                }
-            }
-        }
-
-        finalize_pending(pending, &mut plan, words_per_lane, num_vectors);
-        Some(plan)
-    }
-
-    fn parse_const_bits(literal: &str, width: u32) -> Option<Vec<bool>> {
-        let (base, digits) = if let Some(rest) = literal.strip_prefix("0b") {
-            (2u32, rest)
-        } else if let Some(rest) = literal.strip_prefix("0B") {
-            (2u32, rest)
-        } else if let Some(rest) = literal.strip_prefix("0x") {
-            (16u32, rest)
-        } else if let Some(rest) = literal.strip_prefix("0X") {
-            (16u32, rest)
-        } else {
-            (10u32, literal)
-        };
-
-        let digits: String = digits.chars().filter(|c| *c != '_').collect();
-        if digits.is_empty() {
-            return None;
-        }
-
-        let value = match base {
-            2 => BigUint::from_str_radix(&digits, 2).ok()?,
-            16 => BigUint::from_str_radix(&digits, 16).ok()?,
-            10 => BigUint::parse_bytes(digits.as_bytes(), 10)?,
-            _ => unreachable!(),
-        };
-
-        let width = width as usize;
-        if width == 0 {
-            return Some(Vec::new());
-        }
-
-        if value.bits() > width as u64 {
-            return None;
-        }
-
-        let mut bits = Vec::with_capacity(width);
-        for index in 0..width {
-            bits.push(value.bit(index as u64));
-        }
-
-        Some(bits)
-    }
-
-    fn build_not_kernel(
-        node: &v2m_formats::nir::Node,
-        net_indices: &HashMap<String, PackedIndex>,
-    ) -> Option<UnaryKernel> {
-        let input_ref = node.pin_map.get("A")?;
-        let output_ref = node.pin_map.get("Y")?;
-        let input_net = bitref_full_net(input_ref, node.width)?;
-        let output_net = bitref_full_net(output_ref, node.width)?;
-        let input_index = *net_indices
-            .get(input_net)
-            .expect("NOT input net must be allocated");
-        let output_index = *net_indices
-            .get(output_net)
-            .expect("NOT output net must be allocated");
-
-        Some(UnaryKernel {
-            input: input_index,
-            output: output_index,
-        })
-    }
-
-    fn build_and_kernel(
-        node: &v2m_formats::nir::Node,
-        net_indices: &HashMap<String, PackedIndex>,
-    ) -> Option<BinaryKernel> {
-        Self::build_bitwise_kernel(node, net_indices, "AND")
-    }
-
-    fn build_or_kernel(
-        node: &v2m_formats::nir::Node,
-        net_indices: &HashMap<String, PackedIndex>,
-    ) -> Option<BinaryKernel> {
-        Self::build_bitwise_kernel(node, net_indices, "OR")
-    }
-
-    fn build_xor_kernel(
-        node: &v2m_formats::nir::Node,
-        net_indices: &HashMap<String, PackedIndex>,
-    ) -> Option<BinaryKernel> {
-        Self::build_bitwise_kernel(node, net_indices, "XOR")
-    }
-
-    fn build_xnor_kernel(
-        node: &v2m_formats::nir::Node,
-        net_indices: &HashMap<String, PackedIndex>,
-    ) -> Option<BinaryKernel> {
-        Self::build_bitwise_kernel(node, net_indices, "XNOR")
-    }
-
-    fn build_bitwise_kernel(
-        node: &v2m_formats::nir::Node,
-        net_indices: &HashMap<String, PackedIndex>,
-        op_name: &'static str,
-    ) -> Option<BinaryKernel> {
-        let input_a_ref = node.pin_map.get("A")?;
-        let input_b_ref = node.pin_map.get("B")?;
-        let output_ref = node.pin_map.get("Y")?;
-        let input_a_net = bitref_full_net(input_a_ref, node.width)?;
-        let input_b_net = bitref_full_net(input_b_ref, node.width)?;
-        let output_net = bitref_full_net(output_ref, node.width)?;
-
-        let input_a = *net_indices.get(input_a_net).unwrap_or_else(|| {
-            panic!("{op_name} A input net must be allocated");
-        });
-        let input_b = *net_indices.get(input_b_net).unwrap_or_else(|| {
-            panic!("{op_name} B input net must be allocated");
-        });
-        let output = *net_indices.get(output_net).unwrap_or_else(|| {
-            panic!("{op_name} output net must be allocated");
-        });
-
-        Some(BinaryKernel {
-            input_a,
-            input_b,
-            output,
-        })
-    }
-
-    fn build_mux_kernel(
-        node: &v2m_formats::nir::Node,
-        net_indices: &HashMap<String, PackedIndex>,
-        words_per_lane: usize,
-        num_vectors: usize,
-    ) -> Option<MuxKernel> {
-        let input_a_ref = node.pin_map.get("A")?;
-        let input_b_ref = node.pin_map.get("B")?;
-        let select_ref = node.pin_map.get("S")?;
-        let output_ref = node.pin_map.get("Y")?;
-
-        let input_a_net = bitref_full_net(input_a_ref, node.width)?;
-        let input_b_net = bitref_full_net(input_b_ref, node.width)?;
-        let select_net = bitref_full_net(select_ref, 1)?;
-        let output_net = bitref_full_net(output_ref, node.width)?;
-
-        let input_a = *net_indices
-            .get(input_a_net)
-            .expect("MUX A input net must be allocated");
-        let input_b = *net_indices
-            .get(input_b_net)
-            .expect("MUX B input net must be allocated");
-        let select = *net_indices
-            .get(select_net)
-            .expect("MUX select net must be allocated");
-        let output = *net_indices
-            .get(output_net)
-            .expect("MUX output net must be allocated");
-
-        if select.lanes() != 1 {
-            return None;
-        }
-
-        let select_masks = if words_per_lane == 0 {
-            Vec::new()
-        } else {
-            (0..words_per_lane)
-                .map(|word| mask_for_word(word, words_per_lane, num_vectors))
-                .collect()
-        };
-
-        Some(MuxKernel {
-            input_a,
-            input_b,
-            select,
-            output,
-            select_masks,
-        })
     }
 
     pub fn step_clock(&mut self, reset_mask: &PackedBitMask) -> Result<(), Error> {
@@ -4088,8 +2828,9 @@ impl<'nir> Evaluator<'nir> {
     pub fn tick(&mut self, inputs: &Packed, reset_mask: &PackedBitMask) -> Result<Packed, Error> {
         self.set_inputs(inputs)?;
         self.comb_eval()?;
+        let outputs = self.outputs.clone();
         self.step_clock(reset_mask)?;
-        Ok(self.get_outputs())
+        Ok(outputs)
     }
 
     pub fn options(&self) -> SimOptions {
