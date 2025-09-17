@@ -12,6 +12,9 @@ num-bigint = { workspace = true }
 num-traits = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
 
-[dev-dependencies]
-rand = "0.8"
+[[bench]]
+name = "alu32"
+harness = false

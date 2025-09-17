@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::time::Instant;
+use std::collections::{BTreeMap, HashMap};
 
 use num_bigint::BigUint;
 use thiserror::Error;
@@ -12,10 +13,14 @@ mod pin_binding;
 mod ports;
 mod profile;
 mod reset;
+mod runner;
 
 pub use packed::{div_ceil, Packed, PackedBitMask, PackedError, PackedIndex};
 pub use ports::PortValueError;
 pub use profile::{KernelKind, KernelReport, ProfileReport};
+pub use runner::{
+    hash_packed_outputs, run_vectors, run_vectors_with_options, RunVectorsError, VectorRun,
+};
 
 use comb::{
     build_comb_kernels, ArithKernel, BinaryKernel, BitSource, MuxKernel, NodeKernel,
@@ -74,9 +79,9 @@ pub struct Evaluator<'nir> {
     regs_next: Packed,
     reg_indices: HashMap<String, PackedIndex>,
     inputs: Packed,
-    input_ports: HashMap<String, PackedIndex>,
+    input_ports: BTreeMap<String, PackedIndex>,
     outputs: Packed,
-    output_ports: HashMap<String, PackedIndex>,
+    output_ports: BTreeMap<String, PackedIndex>,
     node_bindings: HashMap<NodeId, NodePinBindings>,
     dff_nodes: Vec<DffInfo>,
     const_pool: ConstPool,
@@ -2085,6 +2090,48 @@ mod tests {
             .expect("and kernel metrics");
         assert_eq!(and_entry.ops, 1);
         assert!(and_entry.bytes_moved > 0);
+  }
+
+      fn run_vectors_reproducible_across_runs_and_threads() {
+        let nir = build_and_module(8);
+        let seed = 0xCAFE_BABE_u64;
+        let baseline = super::run_vectors(&nir, 256, seed, None).expect("baseline run");
+        let expected_hash = baseline.hash;
+        let recomputed = super::hash_packed_outputs(&baseline.outputs);
+        assert_eq!(recomputed, expected_hash);
+
+        for _ in 0..4 {
+            let result =
+                super::run_vectors(&nir, 256, seed, Some(&expected_hash)).expect("repeat run");
+            assert_eq!(result.hash, expected_hash);
+        }
+
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..4 {
+                handles.push(scope.spawn(|| {
+                    let run = super::run_vectors(&nir, 256, seed, Some(&expected_hash))
+                        .expect("thread run");
+                    run.hash
+                }));
+            }
+            for handle in handles {
+                let hash = handle.join().expect("thread completion");
+                assert_eq!(hash, expected_hash);
+            }
+        });
+    }
+
+    #[test]
+    fn run_vectors_detects_mismatches() {
+        let nir = build_and_module(4);
+        let baseline = super::run_vectors(&nir, 128, 0x1234_5678, None).expect("baseline");
+        let mut wrong = baseline.hash;
+        wrong[0] ^= 0xFF;
+
+        let error = super::run_vectors(&nir, 128, 0x1234_5678, Some(&wrong))
+            .expect_err("mismatch should be detected");
+        assert!(matches!(error, super::RunVectorsError::Mismatch { .. }));
     }
 }
 
@@ -2185,8 +2232,8 @@ impl<'nir> Evaluator<'nir> {
 
         let mut inputs = Packed::new(num_vectors);
         let mut outputs = Packed::new(num_vectors);
-        let mut input_ports = HashMap::new();
-        let mut output_ports = HashMap::new();
+        let mut input_ports = BTreeMap::new();
+        let mut output_ports = BTreeMap::new();
 
         for (name, port) in &module.ports {
             let width = port.bits as usize;
