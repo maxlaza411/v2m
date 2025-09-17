@@ -3,6 +3,7 @@ use std::ptr;
 
 use num_bigint::BigUint;
 use num_traits::{Num, Zero};
+use serde_json::Value;
 
 use thiserror::Error;
 use v2m_formats::nir::{BitRef, Module, Nir, NodeOp, PortDirection};
@@ -120,6 +121,8 @@ pub enum Error {
         #[source]
         source: PinBindingError,
     },
+    #[error("reset mask word count mismatch (expected {expected}, got {actual})")]
+    ResetMaskWordsMismatch { expected: usize, actual: usize },
 }
 
 #[allow(dead_code)]
@@ -136,6 +139,7 @@ pub struct Evaluator<'nir> {
     net_indices: HashMap<String, PackedIndex>,
     net_indices_by_id: HashMap<NetId, PackedIndex>,
     regs_cur: Packed,
+    regs_init: Packed,
     regs_next: Packed,
     reg_indices: HashMap<String, PackedIndex>,
     inputs: Packed,
@@ -506,11 +510,19 @@ enum NodeKernel {
     Sub(ArithKernel),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResetKind {
+    None,
+    Sync,
+    Async,
+}
+
 #[derive(Clone, Debug)]
 struct DffInfo {
     reg_index: PackedIndex,
     d_binding: BitBinding,
     q_binding: BitBinding,
+    reset_kind: ResetKind,
 }
 
 fn bitref_full_net<'a>(bitref: &'a BitRef, expected_width: u32) -> Option<&'a str> {
@@ -545,6 +557,196 @@ fn mask_for_word(word_index: usize, words_per_lane: usize, num_vectors: usize) -
         }
     } else {
         (1u64 << remainder) - 1
+    }
+}
+
+fn reset_kind_from_str(kind: &str) -> Option<ResetKind> {
+    if kind.eq_ignore_ascii_case("sync") {
+        Some(ResetKind::Sync)
+    } else if kind.eq_ignore_ascii_case("async") {
+        Some(ResetKind::Async)
+    } else if kind.eq_ignore_ascii_case("none") || kind.eq_ignore_ascii_case("disabled") {
+        Some(ResetKind::None)
+    } else {
+        None
+    }
+}
+
+fn reset_kind_from_value(value: &Value) -> Option<ResetKind> {
+    match value {
+        Value::String(kind) => reset_kind_from_str(kind),
+        Value::Bool(flag) => Some(if *flag {
+            ResetKind::Async
+        } else {
+            ResetKind::Sync
+        }),
+        Value::Object(map) => {
+            if let Some(kind_value) = map.get("kind") {
+                reset_kind_from_value(kind_value)
+            } else if let Some(kind_value) = map.get("type") {
+                reset_kind_from_value(kind_value)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_reset_kind(node: &v2m_formats::nir::Node) -> ResetKind {
+    if let Some(attrs) = &node.attrs {
+        if let Some(kind_value) = attrs.get("reset_kind") {
+            if let Some(kind) = reset_kind_from_value(kind_value) {
+                return kind;
+            }
+        }
+
+        if let Some(reset_value) = attrs.get("reset") {
+            if let Some(kind) = reset_kind_from_value(reset_value) {
+                return kind;
+            }
+        }
+
+        if let Some(flag) = attrs.get("async_reset").and_then(Value::as_bool) {
+            return if flag {
+                ResetKind::Async
+            } else {
+                ResetKind::Sync
+            };
+        }
+    }
+
+    ResetKind::Sync
+}
+
+fn parse_biguint_string(value: &str) -> Option<BigUint> {
+    let cleaned: String = value.chars().filter(|ch| *ch != '_').collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return Some(BigUint::zero());
+    }
+
+    let (radix, digits) = if let Some(rest) = trimmed.strip_prefix("0x") {
+        (16, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("0X") {
+        (16, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("0b") {
+        (2, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("0B") {
+        (2, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("0o") {
+        (8, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("0O") {
+        (8, rest)
+    } else {
+        (10, trimmed)
+    };
+
+    let digits = digits.trim_start_matches('+');
+    if digits.is_empty() {
+        return Some(BigUint::zero());
+    }
+
+    BigUint::from_str_radix(digits, radix).ok()
+}
+
+fn biguint_to_bits(value: &BigUint, width: usize) -> Vec<bool> {
+    let mut bits = vec![false; width];
+    let digits = value.to_u64_digits();
+    for bit in 0..width {
+        let word_index = bit / 64;
+        let bit_index = bit % 64;
+        if let Some(word) = digits.get(word_index) {
+            bits[bit] = ((*word >> bit_index) & 1) != 0;
+        }
+    }
+    bits
+}
+
+fn parse_init_bits_value(value: &Value, width: usize) -> Option<Vec<bool>> {
+    match value {
+        Value::String(text) => parse_biguint_string(text).map(|big| biguint_to_bits(&big, width)),
+        Value::Number(number) => number
+            .as_u64()
+            .map(|raw| biguint_to_bits(&BigUint::from(raw), width)),
+        Value::Bool(flag) => {
+            let big = if *flag {
+                BigUint::from(1u8)
+            } else {
+                BigUint::zero()
+            };
+            Some(biguint_to_bits(&big, width))
+        }
+        Value::Object(map) => {
+            if let Some(inner) = map.get("init") {
+                return parse_init_bits_value(inner, width);
+            }
+            if let Some(inner) = map.get("value") {
+                return parse_init_bits_value(inner, width);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn parse_init_bits(node: &v2m_formats::nir::Node) -> Vec<bool> {
+    let width = node.width as usize;
+    if width == 0 {
+        return Vec::new();
+    }
+
+    if let Some(attrs) = &node.attrs {
+        if let Some(bits) = attrs
+            .get("init")
+            .and_then(|value| parse_init_bits_value(value, width))
+        {
+            return bits;
+        }
+
+        if let Some(reset_value) = attrs.get("reset") {
+            if let Some(bits) = parse_init_bits_value(reset_value, width) {
+                return bits;
+            }
+
+            if let Value::Object(map) = reset_value {
+                if let Some(bits) = map
+                    .get("init")
+                    .and_then(|value| parse_init_bits_value(value, width))
+                    .or_else(|| {
+                        map.get("value")
+                            .and_then(|value| parse_init_bits_value(value, width))
+                    })
+                {
+                    return bits;
+                }
+            }
+        }
+    }
+
+    vec![false; width]
+}
+
+fn apply_register_init_bits(
+    packed: &mut Packed,
+    index: PackedIndex,
+    bits: &[bool],
+    num_vectors: usize,
+) {
+    let words_per_lane = packed.words_per_lane();
+    if words_per_lane == 0 {
+        return;
+    }
+
+    for (lane, bit) in bits.iter().copied().enumerate().take(index.lanes()) {
+        let lane_words = packed.lane_mut(index, lane);
+        if bit {
+            for word_idx in 0..words_per_lane {
+                lane_words[word_idx] = mask_for_word(word_idx, words_per_lane, num_vectors);
+            }
+        } else {
+            lane_words.fill(0);
+        }
     }
 }
 
@@ -2053,6 +2255,75 @@ mod tests {
         }
     }
 
+    fn build_const_dff_nir(init: &str, reset_kind: &str, const_value: &str) -> Nir {
+        let ports = BTreeMap::new();
+
+        let mut nets = BTreeMap::new();
+        nets.insert(
+            "clk".to_string(),
+            NirNet {
+                bits: 1,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "d".to_string(),
+            NirNet {
+                bits: 1,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "q".to_string(),
+            NirNet {
+                bits: 1,
+                attrs: None,
+            },
+        );
+
+        let mut const_params = BTreeMap::new();
+        const_params.insert("value".to_string(), Value::String(const_value.to_string()));
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "const_d".to_string(),
+            NirNode {
+                uid: "const_d".to_string(),
+                op: NodeOp::Const,
+                width: 1,
+                pin_map: BTreeMap::from([("Y".to_string(), net_bit("d"))]),
+                params: Some(const_params),
+                attrs: None,
+            },
+        );
+
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "reset_kind".to_string(),
+            Value::String(reset_kind.to_string()),
+        );
+        attrs.insert("init".to_string(), Value::String(init.to_string()));
+
+        nodes.insert(
+            "reg".to_string(),
+            NirNode {
+                uid: "reg".to_string(),
+                op: NodeOp::Dff,
+                width: 1,
+                pin_map: BTreeMap::from([
+                    ("D".to_string(), net_bit("d")),
+                    ("Q".to_string(), net_bit("q")),
+                    ("CLK".to_string(), net_bit("clk")),
+                ]),
+                params: None,
+                attrs: Some(attrs),
+            },
+        );
+
+        let module = NirModule { ports, nets, nodes };
+        build_nir(module)
+    }
+
     fn net_bit_index(name: &str, index: u32) -> BitRef {
         BitRef::Net(BitRefNet {
             net: name.to_string(),
@@ -2289,6 +2560,153 @@ mod tests {
             assert_eq!(current, next);
         }
     }
+
+    #[test]
+    fn synchronous_reset_selects_init_on_mask() {
+        let nir = build_const_dff_nir("1", "sync", "0");
+        let mut eval = Evaluator::new(&nir, 1, SimOptions::default()).expect("create evaluator");
+        let reg_index = eval.register_index("reg").expect("register index");
+        let mut reset_mask = PackedBitMask::new(1);
+
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            1
+        );
+
+        eval.comb_eval().expect("comb eval");
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_d(), reg_index, 1),
+            0
+        );
+        eval.step_clock(&reset_mask).expect("step");
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            0
+        );
+
+        {
+            let words = reset_mask.words_mut();
+            words[0] = 1;
+        }
+
+        eval.comb_eval().expect("comb eval");
+        eval.step_clock(&reset_mask).expect("reset step");
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            1
+        );
+
+        {
+            let words = reset_mask.words_mut();
+            words[0] = 0;
+        }
+
+        eval.comb_eval().expect("comb eval");
+        eval.step_clock(&reset_mask).expect("release step");
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            0
+        );
+    }
+
+    #[test]
+    fn synchronous_reset_respects_mask_per_vector() {
+        let nir = build_const_dff_nir("0", "sync", "1");
+        let num_vectors = 130;
+        let mut eval =
+            Evaluator::new(&nir, num_vectors, SimOptions::default()).expect("create evaluator");
+        let reg_index = eval.register_index("reg").expect("register index");
+        let mut reset_mask = PackedBitMask::new(num_vectors);
+
+        eval.comb_eval().expect("comb eval");
+        eval.step_clock(&reset_mask).expect("load ones");
+
+        let registers_q = eval.get_registers_q();
+        let words_per_lane = registers_q.words_per_lane();
+        let lane_values = registers_q.lane(reg_index, 0);
+        for word_idx in 0..words_per_lane {
+            assert_eq!(
+                lane_values[word_idx],
+                mask_for_word(word_idx, words_per_lane, num_vectors)
+            );
+        }
+
+        {
+            let mask_words = reset_mask.words_mut();
+            mask_words[0] = 0xAAAA_AAAA_AAAA_AAAAu64;
+            if words_per_lane > 1 {
+                mask_words[1] = 0x0123_4567_89AB_CDEFu64;
+            }
+            if words_per_lane > 2 {
+                mask_words[2] = 0x3;
+            }
+        }
+
+        eval.comb_eval().expect("comb eval");
+        eval.step_clock(&reset_mask).expect("apply mask");
+
+        let registers_q = eval.get_registers_q();
+        let lane_values = registers_q.lane(reg_index, 0);
+        for word_idx in 0..words_per_lane {
+            let vector_mask = mask_for_word(word_idx, words_per_lane, num_vectors);
+            let mask_word = reset_mask.words()[word_idx] & vector_mask;
+            let expected = (!mask_word) & vector_mask;
+            assert_eq!(lane_values[word_idx], expected);
+        }
+    }
+
+    #[test]
+    fn async_reset_overrides_without_comb_eval() {
+        let nir = build_const_dff_nir("0", "async", "1");
+        let mut eval = Evaluator::new(&nir, 1, SimOptions::default()).expect("create evaluator");
+        let reg_index = eval.register_index("reg").expect("register index");
+        let mut reset_mask = PackedBitMask::new(1);
+
+        eval.comb_eval().expect("comb eval");
+        eval.step_clock(&reset_mask).expect("step");
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            1
+        );
+
+        {
+            let words = reset_mask.words_mut();
+            words[0] = 1;
+        }
+
+        eval.step_clock(&reset_mask).expect("async reset");
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            0
+        );
+    }
+
+    #[test]
+    fn reset_mask_ignores_register_without_reset() {
+        let nir = build_const_dff_nir("1", "none", "0");
+        let mut eval = Evaluator::new(&nir, 1, SimOptions::default()).expect("create evaluator");
+        let reg_index = eval.register_index("reg").expect("register index");
+        let mut reset_mask = PackedBitMask::new(1);
+
+        eval.comb_eval().expect("comb eval");
+        eval.step_clock(&reset_mask).expect("step");
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            0
+        );
+
+        {
+            let words = reset_mask.words_mut();
+            words[0] = 1;
+        }
+
+        eval.comb_eval().expect("comb eval");
+        eval.step_clock(&reset_mask).expect("mask step");
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            0
+        );
+    }
 }
 
 impl<'nir> Evaluator<'nir> {
@@ -2326,6 +2744,7 @@ impl<'nir> Evaluator<'nir> {
             }
         }
         let regs_next = regs_cur.duplicate_layout();
+        let mut regs_init = regs_cur.duplicate_layout();
 
         let mut node_bindings: HashMap<NodeId, NodePinBindings> = HashMap::new();
         let mut const_pool = ConstPool::default();
@@ -2371,13 +2790,19 @@ impl<'nir> Evaluator<'nir> {
                 let reg_index = *reg_indices
                     .get(node_name)
                     .expect("DFF node must have allocated register");
+                let reset_kind = parse_reset_kind(node);
+                let init_bits = parse_init_bits(node);
+                apply_register_init_bits(&mut regs_init, reg_index, &init_bits, num_vectors);
                 dff_nodes.push(DffInfo {
                     reg_index,
                     d_binding,
                     q_binding,
+                    reset_kind,
                 });
             }
         }
+
+        regs_cur.copy_from(&regs_init)?;
 
         let mut inputs = Packed::new(num_vectors);
         let mut outputs = Packed::new(num_vectors);
@@ -2430,6 +2855,7 @@ impl<'nir> Evaluator<'nir> {
             net_indices,
             net_indices_by_id,
             regs_cur,
+            regs_init,
             regs_next,
             reg_indices,
             inputs,
@@ -2738,6 +3164,30 @@ impl<'nir> Evaluator<'nir> {
                 reg_lane += width;
             }
             debug_assert_eq!(reg_lane, dff.reg_index.lanes());
+        }
+    }
+
+    fn apply_reset_to_register(&mut self, index: PackedIndex, mask_words: &[u64]) {
+        let words_per_lane = self.regs_cur.words_per_lane();
+        if words_per_lane == 0 {
+            return;
+        }
+
+        let base = index.offset();
+        for lane in 0..index.lanes() {
+            let lane_offset = base + lane * words_per_lane;
+            for word_idx in 0..words_per_lane {
+                let active_vectors = mask_for_word(word_idx, words_per_lane, self.num_vectors);
+                let mask = mask_words[word_idx] & active_vectors;
+                if mask == 0 {
+                    continue;
+                }
+
+                let word_index = lane_offset + word_idx;
+                let current = self.regs_cur.storage[word_index];
+                let init_word = self.regs_init.storage[word_index];
+                self.regs_cur.storage[word_index] = (current & !mask) | (init_word & mask);
+            }
         }
     }
 
@@ -3581,8 +4031,41 @@ impl<'nir> Evaluator<'nir> {
         })
     }
 
-    pub fn step_clock(&mut self, _reset_mask: &PackedBitMask) -> Result<(), Error> {
+    pub fn step_clock(&mut self, reset_mask: &PackedBitMask) -> Result<(), Error> {
         self.regs_cur.copy_from(&self.regs_next)?;
+
+        let words_per_lane = self.regs_cur.words_per_lane();
+        if words_per_lane == 0 {
+            return Ok(());
+        }
+
+        let mask_words = reset_mask.words();
+        if mask_words.len() != words_per_lane {
+            return Err(Error::ResetMaskWordsMismatch {
+                expected: words_per_lane,
+                actual: mask_words.len(),
+            });
+        }
+
+        if mask_words.iter().all(|&word| word == 0) {
+            return Ok(());
+        }
+
+        let reset_targets: Vec<PackedIndex> = self
+            .dff_nodes
+            .iter()
+            .filter(|dff| !matches!(dff.reset_kind, ResetKind::None))
+            .map(|dff| dff.reg_index)
+            .collect();
+
+        if reset_targets.is_empty() {
+            return Ok(());
+        }
+
+        for reg_index in reset_targets {
+            self.apply_reset_to_register(reg_index, mask_words);
+        }
+
         Ok(())
     }
 
