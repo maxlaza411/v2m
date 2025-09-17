@@ -31,16 +31,27 @@ use ports::{pack_port_biguints, unpack_port_biguints};
 use profile::Profiler;
 use reset::{apply_register_init_bits, parse_init_bits, parse_reset_kind, ResetKind};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SimOptions {
     pub allow_x: bool,
     pub async_reset_is_high: bool,
+}
+
+impl Default for SimOptions {
+    fn default() -> Self {
+        Self {
+            allow_x: false,
+            async_reset_is_high: true,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("top module `{top}` not found in design `{design}`")]
     MissingTop { design: String, top: String },
+    #[error("dual-rail X/Z tracking is not implemented yet")]
+    AllowXUnsupported,
     #[error(transparent)]
     ModuleGraph(#[from] GraphBuildError),
     #[error(transparent)]
@@ -2030,6 +2041,59 @@ mod tests {
     }
 
     #[test]
+    fn async_reset_respects_active_low_polarity() {
+        let nir = build_const_dff_nir("0", "async", "1");
+        let mut eval = Evaluator::new(
+            &nir,
+            1,
+            SimOptions {
+                allow_x: false,
+                async_reset_is_high: false,
+            },
+        )
+        .expect("create evaluator");
+        let reg_index = eval.register_index("reg").expect("register index");
+        let mut reset_mask = PackedBitMask::new(1);
+
+        {
+            let words = reset_mask.words_mut();
+            words[0] = 1;
+        }
+
+        eval.comb_eval().expect("comb eval");
+        eval.step_clock(&reset_mask).expect("step");
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            1
+        );
+
+        {
+            let words = reset_mask.words_mut();
+            words[0] = 0;
+        }
+
+        eval.step_clock(&reset_mask).expect("async reset");
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            0
+        );
+    }
+
+    #[test]
+    fn allow_x_option_is_rejected() {
+        let nir = build_const_dff_nir("0", "sync", "0");
+        let result = Evaluator::new(
+            &nir,
+            1,
+            SimOptions {
+                allow_x: true,
+                ..SimOptions::default()
+            },
+        );
+        assert!(matches!(result, Err(Error::AllowXUnsupported)));
+    }
+
+    #[test]
     fn reset_mask_ignores_register_without_reset() {
         let nir = build_const_dff_nir("1", "none", "0");
         let mut eval = Evaluator::new(&nir, 1, SimOptions::default()).expect("create evaluator");
@@ -2143,6 +2207,10 @@ impl<'nir> Evaluator<'nir> {
                 design: nir.design.clone(),
                 top: nir.top.clone(),
             })?;
+
+        if options.allow_x {
+            return Err(Error::AllowXUnsupported);
+        }
 
         let graph = ModuleGraph::from_module(module)?;
         let (topo, topo_level_offsets, topo_level_map) =
@@ -2593,28 +2661,34 @@ impl<'nir> Evaluator<'nir> {
         }
     }
 
-    fn apply_reset_to_register(&mut self, index: PackedIndex, mask_words: &[u64]) {
-        let words_per_lane = self.regs_cur.words_per_lane();
+    fn apply_reset_to_register(
+        target: &mut Packed,
+        regs_init: &Packed,
+        index: PackedIndex,
+        mask_words: &[u64],
+        num_vectors: usize,
+    ) {
+        let words_per_lane = target.words_per_lane();
         if words_per_lane == 0 {
             return;
         }
 
         let base = index.offset();
-        let regs_init_storage = self.regs_init.storage();
-        let regs_cur_storage = self.regs_cur.storage_mut();
+        let regs_init_storage = regs_init.storage();
+        let target_storage = target.storage_mut();
         for lane in 0..index.lanes() {
             let lane_offset = base + lane * words_per_lane;
             for word_idx in 0..words_per_lane {
-                let active_vectors = mask_for_word(word_idx, words_per_lane, self.num_vectors);
+                let active_vectors = mask_for_word(word_idx, words_per_lane, num_vectors);
                 let mask = mask_words[word_idx] & active_vectors;
                 if mask == 0 {
                     continue;
                 }
 
                 let word_index = lane_offset + word_idx;
-                let current = regs_cur_storage[word_index];
+                let current = target_storage[word_index];
                 let init_word = regs_init_storage[word_index];
-                regs_cur_storage[word_index] = (current & !mask) | (init_word & mask);
+                target_storage[word_index] = (current & !mask) | (init_word & mask);
             }
         }
     }
@@ -2995,10 +3069,9 @@ impl<'nir> Evaluator<'nir> {
     }
 
     pub fn step_clock(&mut self, reset_mask: &PackedBitMask) -> Result<(), Error> {
-        self.regs_cur.copy_from(&self.regs_next)?;
-
         let words_per_lane = self.regs_cur.words_per_lane();
         if words_per_lane == 0 {
+            self.regs_cur.copy_from(&self.regs_next)?;
             return Ok(());
         }
 
@@ -3010,23 +3083,69 @@ impl<'nir> Evaluator<'nir> {
             });
         }
 
-        if mask_words.iter().all(|&word| word == 0) {
-            return Ok(());
+        let mut has_sync_reset = false;
+        let mut has_async_reset = false;
+        for dff in &self.dff_nodes {
+            match dff.reset_kind {
+                ResetKind::Sync => has_sync_reset = true,
+                ResetKind::Async => has_async_reset = true,
+                ResetKind::None => {}
+            }
         }
 
-        let reset_targets: Vec<PackedIndex> = self
-            .dff_nodes
-            .iter()
-            .filter(|dff| !matches!(dff.reset_kind, ResetKind::None))
-            .map(|dff| dff.reg_index)
-            .collect();
-
-        if reset_targets.is_empty() {
-            return Ok(());
+        if has_sync_reset && mask_words.iter().any(|&word| word != 0) {
+            let reset_targets: Vec<PackedIndex> = self
+                .dff_nodes
+                .iter()
+                .filter(|dff| matches!(dff.reset_kind, ResetKind::Sync))
+                .map(|dff| dff.reg_index)
+                .collect();
+            for reg_index in reset_targets {
+                Self::apply_reset_to_register(
+                    &mut self.regs_next,
+                    &self.regs_init,
+                    reg_index,
+                    mask_words,
+                    self.num_vectors,
+                );
+            }
         }
 
-        for reg_index in reset_targets {
-            self.apply_reset_to_register(reg_index, mask_words);
+        self.regs_cur.copy_from(&self.regs_next)?;
+
+        if has_async_reset {
+            let mut asserted_words = Vec::with_capacity(mask_words.len());
+            let mut any_asserted = false;
+            for (word_idx, &word) in mask_words.iter().enumerate() {
+                let active_vectors = mask_for_word(word_idx, words_per_lane, self.num_vectors);
+                let asserted = if self.options.async_reset_is_high {
+                    word & active_vectors
+                } else {
+                    (!word) & active_vectors
+                };
+                if asserted != 0 {
+                    any_asserted = true;
+                }
+                asserted_words.push(asserted);
+            }
+
+            if any_asserted {
+                let reset_targets: Vec<PackedIndex> = self
+                    .dff_nodes
+                    .iter()
+                    .filter(|dff| matches!(dff.reset_kind, ResetKind::Async))
+                    .map(|dff| dff.reg_index)
+                    .collect();
+                for reg_index in reset_targets {
+                    Self::apply_reset_to_register(
+                        &mut self.regs_cur,
+                        &self.regs_init,
+                        reg_index,
+                        &asserted_words,
+                        self.num_vectors,
+                    );
+                }
+            }
         }
 
         Ok(())
