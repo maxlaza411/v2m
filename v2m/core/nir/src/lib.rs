@@ -6,6 +6,7 @@ use std::io::Write;
 mod lint;
 mod normalize;
 mod strash;
+mod verilog;
 
 pub use lint::{lint_module, lint_nir, Driver, LintError};
 pub use normalize::{
@@ -13,6 +14,7 @@ pub use normalize::{
     NormalizedNir, NormalizedNode, NormalizedNodeKind, StateBitSnapshot, StateSnapshot,
 };
 pub use strash::{Literal, ParamMap, StrashKind, StrashNode, StrashNodeId, StructuralHasher};
+pub use verilog::{nir_to_verilog, VerilogExportError};
 
 use v2m_formats::nir::{Module, NodeOp};
 use v2m_formats::{resolve_bitref, BitRef, ResolvedBit};
