@@ -14,3 +14,4 @@ serde = { workspace = true }
 v2m-formats = { path = "../formats" }
 insta = { workspace = true }
 tempfile = "3"
+v2m-evaluator = { path = "../../evaluator" }
