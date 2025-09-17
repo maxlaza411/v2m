@@ -15,3 +15,6 @@ v2m-formats = { path = "../formats" }
 insta = { workspace = true }
 tempfile = "3"
 v2m-evaluator = { path = "../../evaluator" }
+proptest = "1"
+rand = { workspace = true }
+num-bigint = { workspace = true }
