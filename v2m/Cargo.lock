@@ -1206,6 +1206,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tools-yosys"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "typenum"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
