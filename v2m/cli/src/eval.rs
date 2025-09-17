@@ -11,7 +11,7 @@ use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use v2m_evaluator::{div_ceil, Evaluator, PackedBitMask, SimOptions};
+use v2m_evaluator::{div_ceil, Evaluator, PackedBitMask, ProfileReport, SimOptions};
 use v2m_formats::load_nir;
 use v2m_formats::nir::{Module, PortDirection};
 
@@ -44,6 +44,14 @@ pub struct NirEvalArgs {
     /// Path used to compare or capture outputs (json:path or bin:path)
     #[arg(long, value_name = "SPEC")]
     pub out: Option<FormatPath>,
+
+    /// Enable kernel profiling and print metrics to stdout
+    #[arg(long)]
+    pub profile: bool,
+
+    /// Export profile metrics to a JSON file
+    #[arg(long, value_name = "PATH")]
+    pub profile_json: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +150,10 @@ pub fn run(args: NirEvalArgs) -> Result<()> {
     let nir = load_nir(&args.nir)
         .with_context(|| format!("failed to load NIR `{}`", args.nir.display()))?;
 
+    let profile_flag = args.profile;
+    let profile_json_path = args.profile_json.clone();
+    let profiling_enabled = profile_flag || profile_json_path.is_some();
+
     let design_module = nir.modules.get(&nir.top).with_context(|| {
         format!(
             "top module `{}` not found in `{}`",
@@ -201,6 +213,10 @@ pub fn run(args: NirEvalArgs) -> Result<()> {
     let mut evaluator = Evaluator::new(&nir, num_vectors, SimOptions::default())
         .context("failed to build evaluator")?;
 
+    if profiling_enabled {
+        evaluator.enable_profiling();
+    }
+
     let mut output_cycles = Vec::with_capacity(total_cycles);
 
     for (cycle_idx, cycle_inputs) in input_cycles.iter().enumerate().take(total_cycles) {
@@ -231,6 +247,17 @@ pub fn run(args: NirEvalArgs) -> Result<()> {
 
     if let Some(spec) = args.out {
         verify_or_write_outputs(&spec, &eval_outputs)?;
+    }
+
+    if profiling_enabled {
+        if let Some(report) = evaluator.profile_report() {
+            if profile_flag {
+                print_profile_report(&report);
+            }
+            if let Some(path) = profile_json_path.as_ref() {
+                write_profile_json(path, &report)?;
+            }
+        }
     }
 
     Ok(())
@@ -610,6 +637,84 @@ fn print_outputs(outputs: &EvalOutputs) -> Result<()> {
     let json = serde_json::to_string_pretty(outputs)?;
     println!("{json}");
     Ok(())
+}
+
+fn print_profile_report(report: &ProfileReport) {
+    println!();
+    println!("Profile summary:");
+    println!("  total kernels: {}", report.total_ops);
+    println!("  total bytes moved: {}", format_bytes(report.total_bytes));
+    println!(
+        "  total kernel time: {}",
+        format_duration(report.total_time_ns)
+    );
+
+    if report.kernels.is_empty() {
+        println!("  no combinational kernels executed");
+        return;
+    }
+
+    println!();
+    println!("Kernel breakdown:");
+    for entry in &report.kernels {
+        let share = if report.total_time_ns > 0 {
+            (entry.total_time_ns as f64 / report.total_time_ns as f64) * 100.0
+        } else {
+            0.0
+        };
+        println!(
+            "  - {:<6} ops={:<5} bytes={} time={} avg={} share={:.1}%",
+            entry.kind,
+            entry.ops,
+            format_bytes(entry.bytes_moved),
+            format_duration(entry.total_time_ns),
+            format_duration(entry.average_time_ns),
+            share
+        );
+    }
+}
+
+fn write_profile_json(path: &Path, report: &ProfileReport) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create `{}`", parent.display()))?;
+        }
+    }
+
+    let writer = BufWriter::new(
+        File::create(path).with_context(|| format!("failed to create `{}`", path.display()))?,
+    );
+    serde_json::to_writer_pretty(writer, report)?;
+    Ok(())
+}
+
+fn format_duration(ns: u128) -> String {
+    if ns >= 1_000_000_000 {
+        format!("{:.3} s", ns as f64 / 1_000_000_000.0)
+    } else if ns >= 1_000_000 {
+        format!("{:.3} ms", ns as f64 / 1_000_000.0)
+    } else if ns >= 1_000 {
+        format!("{:.3} µs", ns as f64 / 1_000.0)
+    } else {
+        format!("{ns} ns")
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
 }
 
 fn verify_or_write_outputs(spec: &FormatPath, outputs: &EvalOutputs) -> Result<()> {

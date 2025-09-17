@@ -10,6 +10,7 @@ v2m-nir = { path = "../core/nir" }
 thiserror = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = "0.2"
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

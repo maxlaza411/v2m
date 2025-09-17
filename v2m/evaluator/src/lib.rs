@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use num_bigint::BigUint;
 use thiserror::Error;
@@ -9,10 +10,12 @@ mod comb;
 mod packed;
 mod pin_binding;
 mod ports;
+mod profile;
 mod reset;
 
 pub use packed::{div_ceil, Packed, PackedBitMask, PackedError, PackedIndex};
 pub use ports::PortValueError;
+pub use profile::{KernelKind, KernelReport, ProfileReport};
 
 use comb::{
     build_comb_kernels, ArithKernel, BinaryKernel, BitSource, MuxKernel, NodeKernel,
@@ -21,6 +24,7 @@ use comb::{
 use packed::mask_for_word;
 use pin_binding::{bind_bitref, BitBinding, ConstPool, PinBindingError, SignalId, LANE_BITS};
 use ports::{pack_port_biguints, unpack_port_biguints};
+use profile::Profiler;
 use reset::{apply_register_init_bits, parse_init_bits, parse_reset_kind, ResetKind};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -78,6 +82,7 @@ pub struct Evaluator<'nir> {
     const_pool: ConstPool,
     comb_kernels: HashMap<NodeId, NodeKernel>,
     carry_scratch: Vec<u64>,
+    profiler: Option<Profiler>,
 }
 
 #[derive(Clone, Debug)]
@@ -2046,6 +2051,41 @@ mod tests {
             0
         );
     }
+
+    #[test]
+    fn profiling_disabled_by_default() {
+        let nir = build_and_module(1);
+        let mut eval = Evaluator::new(&nir, 4, SimOptions::default()).expect("create evaluator");
+
+        let inputs = eval.inputs.duplicate_layout();
+        let reset = PackedBitMask::new(4);
+
+        eval.tick(&inputs, &reset).expect("tick without profiling");
+
+        assert!(eval.profile_report().is_none());
+    }
+
+    #[test]
+    fn profiling_collects_kernel_metrics() {
+        let nir = build_and_module(1);
+        let mut eval = Evaluator::new(&nir, 8, SimOptions::default()).expect("create evaluator");
+        eval.enable_profiling();
+
+        let inputs = eval.inputs.duplicate_layout();
+        let reset = PackedBitMask::new(8);
+        eval.tick(&inputs, &reset).expect("profiled tick");
+
+        let report = eval.profile_report().expect("profile report");
+        assert!(report.total_ops > 0);
+
+        let and_entry = report
+            .kernels
+            .iter()
+            .find(|entry| matches!(entry.kind, KernelKind::And))
+            .expect("and kernel metrics");
+        assert_eq!(and_entry.ops, 1);
+        assert!(and_entry.bytes_moved > 0);
+    }
 }
 
 impl<'nir> Evaluator<'nir> {
@@ -2206,6 +2246,7 @@ impl<'nir> Evaluator<'nir> {
             const_pool,
             comb_kernels,
             carry_scratch,
+            profiler: None,
         })
     }
 
@@ -2533,6 +2574,21 @@ impl<'nir> Evaluator<'nir> {
     }
 
     fn execute_kernel(&mut self, kernel: &NodeKernel) {
+        if self.profiler.is_some() {
+            let kind = Self::kernel_kind(kernel);
+            let bytes = self.kernel_bytes(kernel);
+            let start = Instant::now();
+            self.execute_kernel_inner(kernel);
+            let duration = start.elapsed();
+            if let Some(profiler) = self.profiler.as_mut() {
+                profiler.record(kind, bytes, duration);
+            }
+        } else {
+            self.execute_kernel_inner(kernel);
+        }
+    }
+
+    fn execute_kernel_inner(&mut self, kernel: &NodeKernel) {
         match kernel {
             NodeKernel::Const(kernel) | NodeKernel::Slice(kernel) | NodeKernel::Cat(kernel) => {
                 self.run_transfer(kernel)
@@ -2545,6 +2601,127 @@ impl<'nir> Evaluator<'nir> {
             NodeKernel::Mux(kernel) => self.run_mux(kernel),
             NodeKernel::Add(kernel) => self.run_arith(kernel),
             NodeKernel::Sub(kernel) => self.run_arith(kernel),
+        }
+    }
+
+    fn kernel_kind(kernel: &NodeKernel) -> KernelKind {
+        match kernel {
+            NodeKernel::Const(_) => KernelKind::Const,
+            NodeKernel::Slice(_) => KernelKind::Slice,
+            NodeKernel::Cat(_) => KernelKind::Cat,
+            NodeKernel::Not(_) => KernelKind::Not,
+            NodeKernel::And(_) => KernelKind::And,
+            NodeKernel::Or(_) => KernelKind::Or,
+            NodeKernel::Xor(_) => KernelKind::Xor,
+            NodeKernel::Xnor(_) => KernelKind::Xnor,
+            NodeKernel::Mux(_) => KernelKind::Mux,
+            NodeKernel::Add(_) => KernelKind::Add,
+            NodeKernel::Sub(_) => KernelKind::Sub,
+        }
+    }
+
+    fn kernel_bytes(&self, kernel: &NodeKernel) -> u64 {
+        let words_per_lane = self.nets.words_per_lane();
+        if words_per_lane == 0 {
+            return 0;
+        }
+
+        match kernel {
+            NodeKernel::Const(kernel) => Self::transfer_bytes(kernel, words_per_lane),
+            NodeKernel::Slice(kernel) | NodeKernel::Cat(kernel) => {
+                Self::transfer_bytes(kernel, words_per_lane)
+            }
+            NodeKernel::Not(kernel) => Self::unary_bytes(kernel, words_per_lane),
+            NodeKernel::And(kernel)
+            | NodeKernel::Or(kernel)
+            | NodeKernel::Xor(kernel)
+            | NodeKernel::Xnor(kernel) => Self::binary_bytes(kernel, words_per_lane),
+            NodeKernel::Mux(kernel) => Self::mux_bytes(kernel, words_per_lane),
+            NodeKernel::Add(kernel) | NodeKernel::Sub(kernel) => {
+                Self::arith_bytes(kernel, words_per_lane)
+            }
+        }
+    }
+
+    fn transfer_bytes(kernel: &TransferKernel, words_per_lane: usize) -> u64 {
+        let mut total_words = 0u128;
+        let words_per_lane = words_per_lane as u128;
+        for segment in &kernel.plan {
+            let lanes = segment.lanes as u128;
+            let len_words = lanes.saturating_mul(words_per_lane);
+            match &segment.source {
+                SegmentSource::Net { .. } => {
+                    total_words = total_words.saturating_add(len_words.saturating_mul(2));
+                }
+                SegmentSource::Const { .. } => {
+                    total_words = total_words.saturating_add(len_words);
+                }
+            }
+        }
+        Self::words_to_bytes(total_words)
+    }
+
+    fn unary_bytes(kernel: &UnaryKernel, words_per_lane: usize) -> u64 {
+        let words_per_lane = words_per_lane as u128;
+        let input_words = kernel.input.lanes() as u128 * words_per_lane;
+        let output_words = kernel.output.lanes() as u128 * words_per_lane;
+        Self::words_to_bytes(input_words.saturating_add(output_words))
+    }
+
+    fn binary_bytes(kernel: &BinaryKernel, words_per_lane: usize) -> u64 {
+        let words_per_lane = words_per_lane as u128;
+        let a_words = kernel.input_a.lanes() as u128 * words_per_lane;
+        let b_words = kernel.input_b.lanes() as u128 * words_per_lane;
+        let out_words = kernel.output.lanes() as u128 * words_per_lane;
+        Self::words_to_bytes(a_words.saturating_add(b_words).saturating_add(out_words))
+    }
+
+    fn mux_bytes(kernel: &MuxKernel, words_per_lane: usize) -> u64 {
+        let words_per_lane = words_per_lane as u128;
+        let a_words = kernel.input_a.lanes() as u128 * words_per_lane;
+        let b_words = kernel.input_b.lanes() as u128 * words_per_lane;
+        let select_words = kernel.select.lanes() as u128 * words_per_lane;
+        let out_words = kernel.output.lanes() as u128 * words_per_lane;
+        Self::words_to_bytes(
+            a_words
+                .saturating_add(b_words)
+                .saturating_add(select_words)
+                .saturating_add(out_words),
+        )
+    }
+
+    fn arith_bytes(kernel: &ArithKernel, words_per_lane: usize) -> u64 {
+        let words_per_lane = words_per_lane as u128;
+        let mut total_words = words_per_lane;
+
+        if kernel.initial_carry {
+            total_words = total_words.saturating_add(words_per_lane);
+        }
+
+        for bit in &kernel.bits {
+            if matches!(bit.a, BitSource::Net { .. }) {
+                total_words = total_words.saturating_add(words_per_lane);
+            }
+            if matches!(bit.b, BitSource::Net { .. }) {
+                total_words = total_words.saturating_add(words_per_lane);
+            }
+
+            // Carry scratch read + write per word
+            total_words = total_words.saturating_add(words_per_lane * 2);
+
+            // Destination write
+            total_words = total_words.saturating_add(words_per_lane);
+        }
+
+        Self::words_to_bytes(total_words)
+    }
+
+    fn words_to_bytes(words: u128) -> u64 {
+        let bytes = words.saturating_mul(8);
+        if bytes > u64::MAX as u128 {
+            u64::MAX
+        } else {
+            bytes as u64
         }
     }
 
@@ -2839,5 +3016,19 @@ impl<'nir> Evaluator<'nir> {
 
     pub fn num_vectors(&self) -> usize {
         self.num_vectors
+    }
+
+    pub fn enable_profiling(&mut self) {
+        if self.profiler.is_none() {
+            self.profiler = Some(Profiler::default());
+        }
+    }
+
+    pub fn disable_profiling(&mut self) {
+        self.profiler = None;
+    }
+
+    pub fn profile_report(&self) -> Option<ProfileReport> {
+        self.profiler.as_ref().map(ProfileReport::from)
     }
 }
