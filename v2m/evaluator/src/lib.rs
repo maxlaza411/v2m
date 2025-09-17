@@ -437,6 +437,9 @@ enum NodeKernel {
     Const(ConstKernel),
     Not(UnaryKernel),
     And(BinaryKernel),
+    Or(BinaryKernel),
+    Xor(BinaryKernel),
+    Xnor(BinaryKernel),
 }
 
 fn bitref_full_net<'a>(bitref: &'a BitRef, expected_width: u32) -> Option<&'a str> {
@@ -871,6 +874,15 @@ mod tests {
         })
     }
 
+    fn net_bus(name: &str, width: u32) -> BitRef {
+        assert!(width > 0);
+        BitRef::Net(BitRefNet {
+            net: name.to_string(),
+            lsb: 0,
+            msb: width - 1,
+        })
+    }
+
     fn build_nir(module: NirModule) -> Nir {
         Nir {
             v: "nir-1.1".to_string(),
@@ -882,6 +894,101 @@ mod tests {
             cmdline: None,
             source_digest_sha256: None,
         }
+    }
+
+    fn build_logic_nir(op: NodeOp, width: u32) -> Nir {
+        assert!(width > 0);
+
+        let is_binary = matches!(
+            op.clone(),
+            NodeOp::And | NodeOp::Or | NodeOp::Xor | NodeOp::Xnor
+        );
+
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "a".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: width,
+                attrs: None,
+            },
+        );
+        if is_binary {
+            ports.insert(
+                "b".to_string(),
+                NirPort {
+                    dir: PortDirection::Input,
+                    bits: width,
+                    attrs: None,
+                },
+            );
+        }
+        ports.insert(
+            "y".to_string(),
+            NirPort {
+                dir: PortDirection::Output,
+                bits: width,
+                attrs: None,
+            },
+        );
+
+        let mut nets = BTreeMap::new();
+        nets.insert(
+            "a".to_string(),
+            NirNet {
+                bits: width,
+                attrs: None,
+            },
+        );
+        if is_binary {
+            nets.insert(
+                "b".to_string(),
+                NirNet {
+                    bits: width,
+                    attrs: None,
+                },
+            );
+        }
+        nets.insert(
+            "y".to_string(),
+            NirNet {
+                bits: width,
+                attrs: None,
+            },
+        );
+
+        let mut pin_map = BTreeMap::new();
+        pin_map.insert("A".to_string(), net_bus("a", width));
+        if is_binary {
+            pin_map.insert("B".to_string(), net_bus("b", width));
+        }
+        pin_map.insert("Y".to_string(), net_bus("y", width));
+
+        let node_name = match op.clone() {
+            NodeOp::Not => "not0",
+            NodeOp::And => "and0",
+            NodeOp::Or => "or0",
+            NodeOp::Xor => "xor0",
+            NodeOp::Xnor => "xnor0",
+            _ => panic!("unsupported op for logic kernel test"),
+        }
+        .to_string();
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            node_name.clone(),
+            NirNode {
+                uid: node_name,
+                op,
+                width,
+                pin_map,
+                params: None,
+                attrs: None,
+            },
+        );
+
+        let module = NirModule { ports, nets, nodes };
+        build_nir(module)
     }
 
     #[test]
@@ -1092,6 +1199,95 @@ mod tests {
         let outputs = eval.get_outputs();
         let value = outputs.lane(output_index, 0)[0];
         assert_eq!(value, 0xFFFF_0000_FFFF_0000u64 & 0x0F0F_0F0F_0F0F_0F0Fu64);
+    }
+
+    #[test]
+    fn unary_logic_kernel_matches_scalar_reference() {
+        let num_vectors = 1024;
+        let mut rng = StdRng::seed_from_u64(0x9E37_79B9_7F4A_7C15);
+
+        for width in 1..=256u32 {
+            let nir = build_logic_nir(NodeOp::Not, width);
+            let mut eval =
+                Evaluator::new(&nir, num_vectors, SimOptions::default()).expect("create evaluator");
+
+            let mut inputs = eval.inputs.duplicate_layout();
+            let input_index = *eval.input_ports.get("a").expect("input a");
+            for word in inputs.slice_mut(input_index) {
+                *word = rng.next_u64();
+            }
+
+            let words_per_lane = inputs.words_per_lane();
+            let mut expected = vec![0u64; input_index.lanes() * words_per_lane];
+            let input_slice = inputs.slice(input_index);
+            for lane in 0..input_index.lanes() {
+                for word_idx in 0..words_per_lane {
+                    let idx = lane * words_per_lane + word_idx;
+                    let mask = mask_for_word(word_idx, words_per_lane, num_vectors);
+                    expected[idx] = (!input_slice[idx]) & mask;
+                }
+            }
+
+            eval.set_inputs(&inputs).expect("set inputs");
+            eval.comb_eval().expect("comb eval");
+
+            let output_index = *eval.output_ports.get("y").expect("output y");
+            let outputs = eval.get_outputs();
+            assert_eq!(outputs.slice(output_index), expected.as_slice());
+        }
+    }
+
+    #[test]
+    fn binary_logic_kernels_match_scalar_reference() {
+        let num_vectors = 1024;
+        let mut rng = StdRng::seed_from_u64(0xC2B2_AE35_27D4_EB4F);
+
+        for op in [NodeOp::And, NodeOp::Or, NodeOp::Xor, NodeOp::Xnor]
+            .iter()
+            .cloned()
+        {
+            for width in 1..=256u32 {
+                let nir = build_logic_nir(op.clone(), width);
+                let mut eval = Evaluator::new(&nir, num_vectors, SimOptions::default())
+                    .expect("create evaluator");
+
+                let mut inputs = eval.inputs.duplicate_layout();
+                let index_a = *eval.input_ports.get("a").expect("input a");
+                let index_b = *eval.input_ports.get("b").expect("input b");
+                for word in inputs.slice_mut(index_a) {
+                    *word = rng.next_u64();
+                }
+                for word in inputs.slice_mut(index_b) {
+                    *word = rng.next_u64();
+                }
+
+                let words_per_lane = inputs.words_per_lane();
+                let slice_a = inputs.slice(index_a);
+                let slice_b = inputs.slice(index_b);
+                let mut expected = vec![0u64; index_a.lanes() * words_per_lane];
+                for lane in 0..index_a.lanes() {
+                    for word_idx in 0..words_per_lane {
+                        let idx = lane * words_per_lane + word_idx;
+                        let mask = mask_for_word(word_idx, words_per_lane, num_vectors);
+                        let value = match op {
+                            NodeOp::And => slice_a[idx] & slice_b[idx],
+                            NodeOp::Or => slice_a[idx] | slice_b[idx],
+                            NodeOp::Xor => slice_a[idx] ^ slice_b[idx],
+                            NodeOp::Xnor => !(slice_a[idx] ^ slice_b[idx]),
+                            _ => unreachable!("non-binary op in binary test"),
+                        } & mask;
+                        expected[idx] = value;
+                    }
+                }
+
+                eval.set_inputs(&inputs).expect("set inputs");
+                eval.comb_eval().expect("comb eval");
+
+                let output_index = *eval.output_ports.get("y").expect("output y");
+                let outputs = eval.get_outputs();
+                assert_eq!(outputs.slice(output_index), expected.as_slice());
+            }
+        }
     }
 }
 
@@ -1416,6 +1612,9 @@ impl<'nir> Evaluator<'nir> {
             NodeKernel::Const(kernel) => self.run_const(kernel),
             NodeKernel::Not(kernel) => self.run_not(kernel),
             NodeKernel::And(kernel) => self.run_and(kernel),
+            NodeKernel::Or(kernel) => self.run_or(kernel),
+            NodeKernel::Xor(kernel) => self.run_xor(kernel),
+            NodeKernel::Xnor(kernel) => self.run_xnor(kernel),
         }
     }
 
@@ -1424,35 +1623,101 @@ impl<'nir> Evaluator<'nir> {
         slice.copy_from_slice(&kernel.words);
     }
 
-    fn run_not(&mut self, kernel: &UnaryKernel) {
+    #[inline]
+    fn apply_unary_op<F>(&mut self, kernel: &UnaryKernel, op: F)
+    where
+        F: Fn(u64) -> u64,
+    {
         let words_per_lane = self.nets.words_per_lane();
         if words_per_lane == 0 {
             return;
         }
 
-        let input_words = self.nets.slice(kernel.input).to_vec();
-        let output_slice = self.nets.slice_mut(kernel.output);
-        for (index, word) in output_slice.iter_mut().enumerate() {
-            let lane_word = index % words_per_lane;
-            let mask = mask_for_word(lane_word, words_per_lane, self.num_vectors);
-            *word = (!input_words[index]) & mask;
+        let lanes = kernel.output.lanes();
+        debug_assert_eq!(kernel.input.lanes(), lanes);
+
+        let storage_ptr = self.nets.storage.as_ptr();
+        let storage_mut_ptr = self.nets.storage.as_mut_ptr();
+        let last_mask = mask_for_word(words_per_lane - 1, words_per_lane, self.num_vectors);
+
+        for lane in 0..lanes {
+            let input_offset = kernel.input.lane_offset(lane, words_per_lane);
+            let output_offset = kernel.output.lane_offset(lane, words_per_lane);
+
+            for word_idx in 0..words_per_lane {
+                let mask = if word_idx + 1 < words_per_lane {
+                    u64::MAX
+                } else {
+                    last_mask
+                };
+
+                unsafe {
+                    let input_word = *storage_ptr.add(input_offset + word_idx);
+                    let value = op(input_word) & mask;
+                    *storage_mut_ptr.add(output_offset + word_idx) = value;
+                }
+            }
         }
     }
 
-    fn run_and(&mut self, kernel: &BinaryKernel) {
+    #[inline]
+    fn apply_binary_op<F>(&mut self, kernel: &BinaryKernel, op: F)
+    where
+        F: Fn(u64, u64) -> u64,
+    {
         let words_per_lane = self.nets.words_per_lane();
         if words_per_lane == 0 {
             return;
         }
 
-        let input_a = self.nets.slice(kernel.input_a).to_vec();
-        let input_b = self.nets.slice(kernel.input_b).to_vec();
-        let output_slice = self.nets.slice_mut(kernel.output);
-        for (index, word) in output_slice.iter_mut().enumerate() {
-            let lane_word = index % words_per_lane;
-            let mask = mask_for_word(lane_word, words_per_lane, self.num_vectors);
-            *word = (input_a[index] & input_b[index]) & mask;
+        let lanes = kernel.output.lanes();
+        debug_assert_eq!(kernel.input_a.lanes(), lanes);
+        debug_assert_eq!(kernel.input_b.lanes(), lanes);
+
+        let storage_ptr = self.nets.storage.as_ptr();
+        let storage_mut_ptr = self.nets.storage.as_mut_ptr();
+        let last_mask = mask_for_word(words_per_lane - 1, words_per_lane, self.num_vectors);
+
+        for lane in 0..lanes {
+            let input_a_offset = kernel.input_a.lane_offset(lane, words_per_lane);
+            let input_b_offset = kernel.input_b.lane_offset(lane, words_per_lane);
+            let output_offset = kernel.output.lane_offset(lane, words_per_lane);
+
+            for word_idx in 0..words_per_lane {
+                let mask = if word_idx + 1 < words_per_lane {
+                    u64::MAX
+                } else {
+                    last_mask
+                };
+
+                unsafe {
+                    let a_word = *storage_ptr.add(input_a_offset + word_idx);
+                    let b_word = *storage_ptr.add(input_b_offset + word_idx);
+                    let value = op(a_word, b_word) & mask;
+                    *storage_mut_ptr.add(output_offset + word_idx) = value;
+                }
+            }
         }
+    }
+
+    fn run_not(&mut self, kernel: &UnaryKernel) {
+        self.apply_unary_op(kernel, |word| !word);
+    }
+
+    fn run_and(&mut self, kernel: &BinaryKernel) {
+        self.apply_binary_op(kernel, |a, b| a & b);
+    }
+
+    fn run_or(&mut self, kernel: &BinaryKernel) {
+        self.apply_binary_op(kernel, |a, b| a | b);
+    }
+
+    fn run_xor(&mut self, kernel: &BinaryKernel) {
+        self.apply_binary_op(kernel, |a, b| a ^ b);
+    }
+
+    fn run_xnor(&mut self, kernel: &BinaryKernel) {
+        self.apply_binary_op(kernel, |a, b| !(a ^ b));
     }
 
     fn build_comb_kernels(
@@ -1479,7 +1744,10 @@ impl<'nir> Evaluator<'nir> {
                         .map(NodeKernel::Const)
                 }
                 NodeOp::Not => Self::build_not_kernel(node, net_indices).map(NodeKernel::Not),
-                NodeOp::And => Self::build_and_kernel(node, net_indices).map(NodeKernel::And),
+                NodeOp::And => Self::build_binary_kernel(node, net_indices).map(NodeKernel::And),
+                NodeOp::Or => Self::build_binary_kernel(node, net_indices).map(NodeKernel::Or),
+                NodeOp::Xor => Self::build_binary_kernel(node, net_indices).map(NodeKernel::Xor),
+                NodeOp::Xnor => Self::build_binary_kernel(node, net_indices).map(NodeKernel::Xnor),
                 _ => None,
             };
 
@@ -1559,7 +1827,7 @@ impl<'nir> Evaluator<'nir> {
         })
     }
 
-    fn build_and_kernel(
+    fn build_binary_kernel(
         node: &v2m_formats::nir::Node,
         net_indices: &HashMap<String, PackedIndex>,
     ) -> Option<BinaryKernel> {
@@ -1572,13 +1840,13 @@ impl<'nir> Evaluator<'nir> {
 
         let input_a = *net_indices
             .get(input_a_net)
-            .expect("AND A input net must be allocated");
+            .expect("binary gate A input net must be allocated");
         let input_b = *net_indices
             .get(input_b_net)
-            .expect("AND B input net must be allocated");
+            .expect("binary gate B input net must be allocated");
         let output = *net_indices
             .get(output_net)
-            .expect("AND output net must be allocated");
+            .expect("binary gate output net must be allocated");
 
         Some(BinaryKernel {
             input_a,
