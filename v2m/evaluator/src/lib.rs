@@ -79,6 +79,7 @@ pub struct Evaluator<'nir> {
     output_ports: BTreeMap<String, PackedIndex>,
     node_bindings: HashMap<NodeId, NodePinBindings>,
     dff_nodes: Vec<DffInfo>,
+    latch_nodes: Vec<LatchInfo>,
     const_pool: ConstPool,
     comb_kernels: HashMap<NodeId, NodeKernel>,
     carry_scratch: Vec<u64>,
@@ -90,6 +91,115 @@ struct DffInfo {
     d_binding: BitBinding,
     q_binding: BitBinding,
     reset_kind: ResetKind,
+}
+
+#[derive(Clone, Debug)]
+struct LatchInfo {
+    reg_index: PackedIndex,
+    d_binding: BitBinding,
+    q_binding: BitBinding,
+    enable_binding: Option<BitBinding>,
+    reset_kind: ResetKind,
+}
+
+fn drive_register_output(
+    source: &Packed,
+    nets: &mut Packed,
+    net_indices_by_id: &HashMap<NetId, PackedIndex>,
+    reg_index: PackedIndex,
+    binding: &BitBinding,
+) {
+    let bits_per_lane = LANE_BITS as usize;
+    let mut reg_lane = 0usize;
+    for descriptor in binding.descriptors() {
+        let width = descriptor.width as usize;
+        let base_bit =
+            descriptor.lane_offset as usize * bits_per_lane + descriptor.bit_offset as usize;
+        match descriptor.source {
+            SignalId::Net(net_id) => {
+                let net_index = *net_indices_by_id
+                    .get(&net_id)
+                    .expect("net index for descriptor");
+                for bit in 0..width {
+                    let reg_lane_idx = reg_lane + bit;
+                    debug_assert!(reg_lane_idx < reg_index.lanes());
+                    let net_lane = base_bit + bit;
+                    debug_assert!(net_lane < net_index.lanes());
+                    let source_words = source.lane(reg_index, reg_lane_idx);
+                    let dest_words = nets.lane_mut(net_index, net_lane);
+                    dest_words.copy_from_slice(source_words);
+                }
+            }
+            SignalId::Const(_) => {
+                debug_assert!(false, "register Q pins should not bind constants");
+            }
+        }
+        reg_lane += width;
+    }
+    debug_assert_eq!(reg_lane, reg_index.lanes());
+}
+
+fn gather_enable_masks(
+    binding: Option<&BitBinding>,
+    nets: &Packed,
+    net_indices_by_id: &HashMap<NetId, PackedIndex>,
+    const_pool: &ConstPool,
+    words_per_lane: usize,
+    num_vectors: usize,
+) -> Vec<u64> {
+    if words_per_lane == 0 {
+        return Vec::new();
+    }
+
+    let mut masks = vec![0u64; words_per_lane];
+    if let Some(binding) = binding {
+        let bits_per_lane = LANE_BITS as usize;
+        for descriptor in binding.descriptors() {
+            let width = descriptor.width as usize;
+            let base_bit =
+                descriptor.lane_offset as usize * bits_per_lane + descriptor.bit_offset as usize;
+            match descriptor.source {
+                SignalId::Net(net_id) => {
+                    let net_index = *net_indices_by_id
+                        .get(&net_id)
+                        .expect("net index for descriptor");
+                    for bit in 0..width {
+                        let net_lane = base_bit + bit;
+                        debug_assert!(net_lane < net_index.lanes());
+                        let lane_words = nets.lane(net_index, net_lane);
+                        for (word_idx, value) in masks.iter_mut().enumerate() {
+                            *value |= lane_words[word_idx];
+                        }
+                    }
+                }
+                SignalId::Const(const_id) => {
+                    let const_value = const_pool.get(const_id);
+                    let lane_index = descriptor.lane_offset as usize;
+                    let chunk = const_value.words.get(lane_index).copied().unwrap_or(0);
+                    for bit in 0..width {
+                        let bit_index = descriptor.bit_offset as usize + bit;
+                        if ((chunk >> bit_index) & 1) != 0 {
+                            for (word_idx, value) in masks.iter_mut().enumerate() {
+                                *value |= mask_for_word(word_idx, words_per_lane, num_vectors);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        for (word_idx, value) in masks.iter_mut().enumerate() {
+            *value = mask_for_word(word_idx, words_per_lane, num_vectors);
+        }
+        return masks;
+    }
+
+    for (word_idx, value) in masks.iter_mut().enumerate() {
+        let active = mask_for_word(word_idx, words_per_lane, num_vectors);
+        *value &= active;
+    }
+
+    masks
 }
 
 #[cfg(test)]
@@ -1667,6 +1777,80 @@ mod tests {
         build_nir(module)
     }
 
+    fn build_latch_nir(init: &str) -> Nir {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "d".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: 1,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "gate".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: 1,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "q".to_string(),
+            NirPort {
+                dir: PortDirection::Output,
+                bits: 1,
+                attrs: None,
+            },
+        );
+
+        let mut nets = BTreeMap::new();
+        nets.insert(
+            "d".to_string(),
+            NirNet {
+                bits: 1,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "gate".to_string(),
+            NirNet {
+                bits: 1,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "q".to_string(),
+            NirNet {
+                bits: 1,
+                attrs: None,
+            },
+        );
+
+        let mut attrs = BTreeMap::new();
+        attrs.insert("init".to_string(), Value::String(init.to_string()));
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "latch".to_string(),
+            NirNode {
+                uid: "latch".to_string(),
+                op: NodeOp::Latch,
+                width: 1,
+                pin_map: BTreeMap::from([
+                    ("D".to_string(), net_bit("d")),
+                    ("Q".to_string(), net_bit("q")),
+                    ("EN".to_string(), net_bit("gate")),
+                ]),
+                params: None,
+                attrs: Some(attrs),
+            },
+        );
+
+        let module = NirModule { ports, nets, nodes };
+        build_nir(module)
+    }
+
     fn net_bit_index(name: &str, index: u32) -> BitRef {
         BitRef::Net(BitRefNet {
             net: name.to_string(),
@@ -2052,6 +2236,97 @@ mod tests {
     }
 
     #[test]
+    fn latch_updates_and_holds_based_on_gate() {
+        let nir = build_latch_nir("0");
+        let mut eval = Evaluator::new(&nir, 1, SimOptions::default()).expect("create evaluator");
+        let reg_index = eval.register_index("latch").expect("register index");
+        let output_index = *eval.output_ports.get("q").expect("output port");
+
+        let mut inputs = HashMap::new();
+        inputs.insert("d".to_string(), vec![BigUint::from(0u32)]);
+        inputs.insert("gate".to_string(), vec![BigUint::from(0u32)]);
+        let packed_inputs = eval
+            .pack_inputs_from_biguints(&inputs)
+            .expect("pack inputs");
+        eval.set_inputs(&packed_inputs).expect("set inputs");
+        eval.comb_eval().expect("comb eval");
+        let outputs = eval.get_outputs();
+        assert_eq!(packed_scalar_value(&outputs, output_index, 1), 0);
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            0
+        );
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_d(), reg_index, 1),
+            0
+        );
+
+        let mut inputs = HashMap::new();
+        inputs.insert("d".to_string(), vec![BigUint::from(1u32)]);
+        inputs.insert("gate".to_string(), vec![BigUint::from(0u32)]);
+        let packed_inputs = eval
+            .pack_inputs_from_biguints(&inputs)
+            .expect("pack inputs");
+        eval.set_inputs(&packed_inputs).expect("set inputs");
+        eval.comb_eval().expect("comb eval");
+        let outputs = eval.get_outputs();
+        assert_eq!(packed_scalar_value(&outputs, output_index, 1), 0);
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            0
+        );
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_d(), reg_index, 1),
+            0
+        );
+
+        let mut inputs = HashMap::new();
+        inputs.insert("d".to_string(), vec![BigUint::from(1u32)]);
+        inputs.insert("gate".to_string(), vec![BigUint::from(1u32)]);
+        let packed_inputs = eval
+            .pack_inputs_from_biguints(&inputs)
+            .expect("pack inputs");
+        eval.set_inputs(&packed_inputs).expect("set inputs");
+        eval.comb_eval().expect("comb eval");
+        let outputs = eval.get_outputs();
+        assert_eq!(packed_scalar_value(&outputs, output_index, 1), 1);
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            1
+        );
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_d(), reg_index, 1),
+            1
+        );
+
+        let mut inputs = HashMap::new();
+        inputs.insert("d".to_string(), vec![BigUint::from(0u32)]);
+        inputs.insert("gate".to_string(), vec![BigUint::from(0u32)]);
+        let packed_inputs = eval
+            .pack_inputs_from_biguints(&inputs)
+            .expect("pack inputs");
+        eval.set_inputs(&packed_inputs).expect("set inputs");
+        eval.comb_eval().expect("comb eval");
+        let outputs = eval.get_outputs();
+        assert_eq!(packed_scalar_value(&outputs, output_index, 1), 1);
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            1
+        );
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_d(), reg_index, 1),
+            1
+        );
+
+        let reset_mask = PackedBitMask::new(1);
+        eval.step_clock(&reset_mask).expect("step clock");
+        assert_eq!(
+            packed_scalar_value(&eval.get_registers_q(), reg_index, 1),
+            1
+        );
+    }
+
+    #[test]
     fn run_vectors_reproducible_across_runs_and_threads() {
         let nir = build_and_module(8);
         let seed = 0xCAFE_BABE_u64;
@@ -2155,36 +2430,77 @@ impl<'nir> Evaluator<'nir> {
         }
 
         let mut dff_nodes = Vec::new();
+        let mut latch_nodes = Vec::new();
         for (node_name, node) in &module.nodes {
-            if matches!(node.op, NodeOp::Dff) {
-                let node_id = graph
-                    .node_id(node_name.as_str())
-                    .expect("node must exist in graph");
-                let bindings = node_bindings
-                    .get(&node_id)
-                    .expect("DFF node must have pin bindings");
-                let d_binding = bindings
-                    .pins
-                    .get("D")
-                    .expect("DFF node must bind D pin")
-                    .clone();
-                let q_binding = bindings
-                    .pins
-                    .get("Q")
-                    .expect("DFF node must bind Q pin")
-                    .clone();
-                let reg_index = *reg_indices
-                    .get(node_name)
-                    .expect("DFF node must have allocated register");
-                let reset_kind = parse_reset_kind(node);
-                let init_bits = parse_init_bits(node);
-                apply_register_init_bits(&mut regs_init, reg_index, &init_bits, num_vectors);
-                dff_nodes.push(DffInfo {
-                    reg_index,
-                    d_binding,
-                    q_binding,
-                    reset_kind,
-                });
+            match node.op {
+                NodeOp::Dff => {
+                    let node_id = graph
+                        .node_id(node_name.as_str())
+                        .expect("node must exist in graph");
+                    let bindings = node_bindings
+                        .get(&node_id)
+                        .expect("DFF node must have pin bindings");
+                    let d_binding = bindings
+                        .pins
+                        .get("D")
+                        .expect("DFF node must bind D pin")
+                        .clone();
+                    let q_binding = bindings
+                        .pins
+                        .get("Q")
+                        .expect("DFF node must bind Q pin")
+                        .clone();
+                    let reg_index = *reg_indices
+                        .get(node_name)
+                        .expect("DFF node must have allocated register");
+                    let reset_kind = parse_reset_kind(node);
+                    let init_bits = parse_init_bits(node);
+                    apply_register_init_bits(&mut regs_init, reg_index, &init_bits, num_vectors);
+                    dff_nodes.push(DffInfo {
+                        reg_index,
+                        d_binding,
+                        q_binding,
+                        reset_kind,
+                    });
+                }
+                NodeOp::Latch => {
+                    let node_id = graph
+                        .node_id(node_name.as_str())
+                        .expect("node must exist in graph");
+                    let bindings = node_bindings
+                        .get(&node_id)
+                        .expect("Latch node must have pin bindings");
+                    let d_binding = bindings
+                        .pins
+                        .get("D")
+                        .expect("Latch node must bind D pin")
+                        .clone();
+                    let q_binding = bindings
+                        .pins
+                        .get("Q")
+                        .expect("Latch node must bind Q pin")
+                        .clone();
+                    let enable_binding = bindings
+                        .pins
+                        .get("EN")
+                        .or_else(|| bindings.pins.get("GATE"))
+                        .or_else(|| bindings.pins.get("CLK"))
+                        .cloned();
+                    let reg_index = *reg_indices
+                        .get(node_name)
+                        .expect("Latch node must have allocated register");
+                    let reset_kind = parse_reset_kind(node);
+                    let init_bits = parse_init_bits(node);
+                    apply_register_init_bits(&mut regs_init, reg_index, &init_bits, num_vectors);
+                    latch_nodes.push(LatchInfo {
+                        reg_index,
+                        d_binding,
+                        q_binding,
+                        enable_binding,
+                        reset_kind,
+                    });
+                }
+                _ => {}
             }
         }
 
@@ -2250,6 +2566,7 @@ impl<'nir> Evaluator<'nir> {
             output_ports,
             node_bindings,
             dff_nodes,
+            latch_nodes,
             const_pool,
             comb_kernels,
             carry_scratch,
@@ -2453,37 +2770,24 @@ impl<'nir> Evaluator<'nir> {
     }
 
     fn stage_registers(&mut self) {
-        let bits_per_lane = LANE_BITS as usize;
-
         for dff in &self.dff_nodes {
-            let mut reg_lane = 0usize;
-            for descriptor in dff.q_binding.descriptors() {
-                let width = descriptor.width as usize;
-                let base_bit = descriptor.lane_offset as usize * bits_per_lane
-                    + descriptor.bit_offset as usize;
-                match descriptor.source {
-                    SignalId::Net(net_id) => {
-                        let net_index = *self
-                            .net_indices_by_id
-                            .get(&net_id)
-                            .expect("net index for descriptor");
-                        for bit in 0..width {
-                            let reg_lane_idx = reg_lane + bit;
-                            debug_assert!(reg_lane_idx < dff.reg_index.lanes());
-                            let net_lane = base_bit + bit;
-                            debug_assert!(net_lane < net_index.lanes());
-                            let source = self.regs_cur.lane(dff.reg_index, reg_lane_idx);
-                            let dest = self.nets.lane_mut(net_index, net_lane);
-                            dest.copy_from_slice(source);
-                        }
-                    }
-                    SignalId::Const(_) => {
-                        debug_assert!(false, "DFF Q pins should not bind constants");
-                    }
-                }
-                reg_lane += width;
-            }
-            debug_assert_eq!(reg_lane, dff.reg_index.lanes());
+            drive_register_output(
+                &self.regs_cur,
+                &mut self.nets,
+                &self.net_indices_by_id,
+                dff.reg_index,
+                &dff.q_binding,
+            );
+        }
+
+        for latch in &self.latch_nodes {
+            drive_register_output(
+                &self.regs_cur,
+                &mut self.nets,
+                &self.net_indices_by_id,
+                latch.reg_index,
+                &latch.q_binding,
+            );
         }
     }
 
@@ -2550,6 +2854,99 @@ impl<'nir> Evaluator<'nir> {
                 reg_lane += width;
             }
             debug_assert_eq!(reg_lane, dff.reg_index.lanes());
+        }
+
+        for latch in &self.latch_nodes {
+            {
+                let next_slice = self.regs_next.slice_mut(latch.reg_index);
+                let current_slice = self.regs_cur.slice(latch.reg_index);
+                next_slice.copy_from_slice(current_slice);
+            }
+
+            if words_per_lane == 0 {
+                continue;
+            }
+
+            let enable_masks = gather_enable_masks(
+                latch.enable_binding.as_ref(),
+                &self.nets,
+                &self.net_indices_by_id,
+                &self.const_pool,
+                words_per_lane,
+                self.num_vectors,
+            );
+
+            let mut reg_lane = 0usize;
+            for descriptor in latch.d_binding.descriptors() {
+                let width = descriptor.width as usize;
+                let base_bit = descriptor.lane_offset as usize * bits_per_lane
+                    + descriptor.bit_offset as usize;
+                match descriptor.source {
+                    SignalId::Net(net_id) => {
+                        let net_index = *self
+                            .net_indices_by_id
+                            .get(&net_id)
+                            .expect("net index for descriptor");
+                        for bit in 0..width {
+                            let reg_lane_idx = reg_lane + bit;
+                            debug_assert!(reg_lane_idx < latch.reg_index.lanes());
+                            let net_lane = base_bit + bit;
+                            debug_assert!(net_lane < net_index.lanes());
+                            let source = self.nets.lane(net_index, net_lane);
+                            let dest_next = self.regs_next.lane_mut(latch.reg_index, reg_lane_idx);
+                            let dest_cur = self.regs_cur.lane_mut(latch.reg_index, reg_lane_idx);
+                            for word_idx in 0..words_per_lane {
+                                let mask =
+                                    mask_for_word(word_idx, words_per_lane, self.num_vectors);
+                                let active = enable_masks[word_idx] & mask;
+                                if active == 0 {
+                                    continue;
+                                }
+                                let prev = dest_next[word_idx];
+                                let new_word = (prev & !active) | (source[word_idx] & active);
+                                dest_next[word_idx] = new_word;
+                                dest_cur[word_idx] = new_word;
+                            }
+                        }
+                    }
+                    SignalId::Const(const_id) => {
+                        let const_value = self.const_pool.get(const_id);
+                        let lane_index = descriptor.lane_offset as usize;
+                        let chunk = const_value.words.get(lane_index).copied().unwrap_or(0);
+                        for bit in 0..width {
+                            let bit_index = descriptor.bit_offset as usize + bit;
+                            let reg_lane_idx = reg_lane + bit;
+                            debug_assert!(reg_lane_idx < latch.reg_index.lanes());
+                            let dest_next = self.regs_next.lane_mut(latch.reg_index, reg_lane_idx);
+                            let dest_cur = self.regs_cur.lane_mut(latch.reg_index, reg_lane_idx);
+                            let bit_one = ((chunk >> bit_index) & 1) != 0;
+                            for word_idx in 0..words_per_lane {
+                                let mask =
+                                    mask_for_word(word_idx, words_per_lane, self.num_vectors);
+                                let active = enable_masks[word_idx] & mask;
+                                if active == 0 {
+                                    continue;
+                                }
+                                let prev = dest_next[word_idx];
+                                let new_bits = if bit_one { active } else { 0 };
+                                let new_word = (prev & !active) | new_bits;
+                                dest_next[word_idx] = new_word;
+                                dest_cur[word_idx] = new_word;
+                            }
+                        }
+                    }
+                }
+                reg_lane += width;
+            }
+            debug_assert_eq!(reg_lane, latch.reg_index.lanes());
+
+            drive_register_output(
+                &self.regs_cur,
+                &mut self.nets,
+                &self.net_indices_by_id,
+                latch.reg_index,
+                &latch.q_binding,
+            );
         }
     }
 
@@ -2838,12 +3235,19 @@ impl<'nir> Evaluator<'nir> {
             return Ok(());
         }
 
-        let reset_targets: Vec<PackedIndex> = self
+        let mut reset_targets: Vec<PackedIndex> = self
             .dff_nodes
             .iter()
             .filter(|dff| !matches!(dff.reset_kind, ResetKind::None))
             .map(|dff| dff.reg_index)
             .collect();
+
+        reset_targets.extend(
+            self.latch_nodes
+                .iter()
+                .filter(|latch| !matches!(latch.reset_kind, ResetKind::None))
+                .map(|latch| latch.reg_index),
+        );
 
         if reset_targets.is_empty() {
             return Ok(());
