@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
+use std::ptr;
 
 use num_bigint::BigUint;
-use num_traits::Zero;
+use num_traits::{Num, Zero};
 
 use thiserror::Error;
 use v2m_formats::nir::{BitRef, Module, Nir, NodeOp, PortDirection};
@@ -9,7 +10,9 @@ use v2m_nir::{BuildError as GraphBuildError, EvalOrderError, ModuleGraph, NetId,
 
 mod pin_binding;
 
-use pin_binding::{bind_bitref, BitBinding, ConstPool, PinBindingError, SignalId, LANE_BITS};
+use pin_binding::{
+    bind_bitref, BitBinding, ConstId, ConstPool, PinBindingError, SignalId, LANE_BITS,
+};
 
 const WORD_BITS: usize = 64;
 
@@ -143,6 +146,7 @@ pub struct Evaluator<'nir> {
     dff_nodes: Vec<DffInfo>,
     const_pool: ConstPool,
     comb_kernels: HashMap<NodeId, NodeKernel>,
+    carry_scratch: Vec<u64>,
 }
 
 impl Packed {
@@ -415,12 +419,6 @@ struct NodePinBindings {
 }
 
 #[derive(Clone, Debug)]
-struct ConstKernel {
-    output: PackedIndex,
-    words: Vec<u64>,
-}
-
-#[derive(Clone, Debug)]
 struct UnaryKernel {
     input: PackedIndex,
     output: PackedIndex,
@@ -443,11 +441,66 @@ struct MuxKernel {
 }
 
 #[derive(Clone, Debug)]
+struct TransferSegment {
+    dest_offset: usize,
+    lanes: usize,
+    source: SegmentSource,
+}
+
+#[derive(Clone, Debug)]
+enum SegmentSource {
+    Net { offset: usize },
+    Const { words: Vec<u64> },
+}
+
+#[derive(Clone, Debug)]
+struct TransferKernel {
+    plan: Vec<TransferSegment>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BitSource {
+    Net { offset: usize },
+    Const { value: bool },
+}
+
+#[derive(Clone, Debug)]
+struct ArithBit {
+    a: BitSource,
+    b: BitSource,
+    dest_offset: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ArithKernel {
+    bits: Vec<ArithBit>,
+    invert_b: bool,
+    initial_carry: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PackedSourceKind {
+    Net(NetId, usize),
+    Const(ConstId, usize),
+    Literal(bool),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PackedDestination {
+    net: NetId,
+    lane: usize,
+}
+
+#[derive(Clone, Debug)]
 enum NodeKernel {
-    Const(ConstKernel),
+    Const(TransferKernel),
     Not(UnaryKernel),
     And(BinaryKernel),
     Mux(MuxKernel),
+    Slice(TransferKernel),
+    Cat(TransferKernel),
+    Add(ArithKernel),
+    Sub(ArithKernel),
 }
 
 #[derive(Clone, Debug)]
@@ -490,36 +543,6 @@ fn mask_for_word(word_index: usize, words_per_lane: usize, num_vectors: usize) -
     } else {
         (1u64 << remainder) - 1
     }
-}
-
-fn parse_const_bool(literal: &str) -> Option<bool> {
-    let cleaned: String = literal.chars().filter(|c| *c != '_').collect();
-    if cleaned.is_empty() {
-        return None;
-    }
-
-    let (base, digits) = if let Some(rest) = cleaned.strip_prefix("0b") {
-        (2, rest)
-    } else if let Some(rest) = cleaned.strip_prefix("0B") {
-        (2, rest)
-    } else if let Some(rest) = cleaned.strip_prefix("0x") {
-        (16, rest)
-    } else if let Some(rest) = cleaned.strip_prefix("0X") {
-        (16, rest)
-    } else {
-        (10, cleaned.as_str())
-    };
-
-    if digits.is_empty() {
-        return None;
-    }
-
-    let value = u128::from_str_radix(digits, base).ok()?;
-    if value > 1 {
-        return None;
-    }
-
-    Some(value == 1)
 }
 
 #[cfg(test)]
@@ -657,7 +680,8 @@ mod tests {
     }
     use serde_json::Value;
     use v2m_formats::nir::{
-        BitRef, BitRefNet, Module as NirModule, Net as NirNet, Node as NirNode, Port as NirPort,
+        BitRef, BitRefConcat, BitRefNet, Module as NirModule, Net as NirNet, Node as NirNode,
+        Port as NirPort,
     };
 
     fn build_and_module(width: u32) -> Nir {
@@ -1541,6 +1565,491 @@ mod tests {
         assert_eq!(lane1[1], inputs.lane(input_b, 1)[1] & mask1);
     }
 
+    #[test]
+    fn slice_kernel_transfers_bits_across_lanes() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "wide".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: 96,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "slice".to_string(),
+            NirPort {
+                dir: PortDirection::Output,
+                bits: 70,
+                attrs: None,
+            },
+        );
+
+        let mut nets = BTreeMap::new();
+        nets.insert(
+            "wide".to_string(),
+            NirNet {
+                bits: 96,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "slice".to_string(),
+            NirNet {
+                bits: 70,
+                attrs: None,
+            },
+        );
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "slice0".to_string(),
+            NirNode {
+                uid: "slice0".to_string(),
+                op: NodeOp::Slice,
+                width: 70,
+                pin_map: BTreeMap::from([
+                    (
+                        "A".to_string(),
+                        BitRef::Net(BitRefNet {
+                            net: "wide".to_string(),
+                            lsb: 13,
+                            msb: 82,
+                        }),
+                    ),
+                    (
+                        "Y".to_string(),
+                        BitRef::Net(BitRefNet {
+                            net: "slice".to_string(),
+                            lsb: 0,
+                            msb: 69,
+                        }),
+                    ),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+
+        let module = NirModule { ports, nets, nodes };
+        let nir = build_nir(module);
+        let num_vectors = 256;
+        let mut eval = Evaluator::new(&nir, num_vectors, SimOptions::default()).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(0x5EED_5EED);
+        let wide_values = random_biguints(96, num_vectors, &mut rng);
+        let mut inputs = HashMap::new();
+        inputs.insert("wide".to_string(), wide_values.clone());
+        let packed_inputs = eval.pack_inputs_from_biguints(&inputs).unwrap();
+        eval.set_inputs(&packed_inputs).unwrap();
+        eval.comb_eval().unwrap();
+
+        let outputs = eval.get_outputs();
+        let unpacked = eval.unpack_outputs_to_biguints(&outputs).unwrap();
+        let slice_values = unpacked.get("slice").expect("slice output");
+        let mask: BigUint = (BigUint::from(1u8) << 70) - BigUint::from(1u8);
+
+        for (input, output) in wide_values.iter().zip(slice_values.iter()) {
+            let mut expected = input.clone();
+            expected >>= 13u32;
+            expected &= mask.clone();
+            assert_eq!(output, &expected);
+        }
+    }
+
+    #[test]
+    fn cat_kernel_concatenates_segments() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "left".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: 60,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "right".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: 45,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "y".to_string(),
+            NirPort {
+                dir: PortDirection::Output,
+                bits: 105,
+                attrs: None,
+            },
+        );
+
+        let mut nets = BTreeMap::new();
+        nets.insert(
+            "left".to_string(),
+            NirNet {
+                bits: 60,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "right".to_string(),
+            NirNet {
+                bits: 45,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "y".to_string(),
+            NirNet {
+                bits: 105,
+                attrs: None,
+            },
+        );
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "cat0".to_string(),
+            NirNode {
+                uid: "cat0".to_string(),
+                op: NodeOp::Cat,
+                width: 105,
+                pin_map: BTreeMap::from([
+                    (
+                        "A".to_string(),
+                        BitRef::Concat(BitRefConcat {
+                            concat: vec![
+                                BitRef::Net(BitRefNet {
+                                    net: "left".to_string(),
+                                    lsb: 0,
+                                    msb: 59,
+                                }),
+                                BitRef::Net(BitRefNet {
+                                    net: "right".to_string(),
+                                    lsb: 0,
+                                    msb: 44,
+                                }),
+                            ],
+                        }),
+                    ),
+                    (
+                        "Y".to_string(),
+                        BitRef::Net(BitRefNet {
+                            net: "y".to_string(),
+                            lsb: 0,
+                            msb: 104,
+                        }),
+                    ),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+
+        let module = NirModule { ports, nets, nodes };
+        let nir = build_nir(module);
+        let num_vectors = 192;
+        let mut eval = Evaluator::new(&nir, num_vectors, SimOptions::default()).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(0xFACE_FEED);
+        let left_values = random_biguints(60, num_vectors, &mut rng);
+        let right_values = random_biguints(45, num_vectors, &mut rng);
+        let mut inputs = HashMap::new();
+        inputs.insert("left".to_string(), left_values.clone());
+        inputs.insert("right".to_string(), right_values.clone());
+        let packed = eval.pack_inputs_from_biguints(&inputs).unwrap();
+        eval.set_inputs(&packed).unwrap();
+        eval.comb_eval().unwrap();
+
+        let outputs = eval.get_outputs();
+        let unpacked = eval.unpack_outputs_to_biguints(&outputs).unwrap();
+        let y_values = unpacked.get("y").expect("cat output");
+
+        for ((left, right), result) in left_values
+            .iter()
+            .zip(right_values.iter())
+            .zip(y_values.iter())
+        {
+            let expected = left.clone() + (right.clone() << 60);
+            assert_eq!(result, &expected);
+        }
+    }
+
+    #[test]
+    fn const_kernel_prefills_multiple_bits() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "y".to_string(),
+            NirPort {
+                dir: PortDirection::Output,
+                bits: 76,
+                attrs: None,
+            },
+        );
+
+        let mut nets = BTreeMap::new();
+        nets.insert(
+            "y".to_string(),
+            NirNet {
+                bits: 76,
+                attrs: None,
+            },
+        );
+
+        let mut params = BTreeMap::new();
+        params.insert(
+            "value".to_string(),
+            Value::String("0x1234_5678_9ABC_DEF0_123".to_string()),
+        );
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "const0".to_string(),
+            NirNode {
+                uid: "const0".to_string(),
+                op: NodeOp::Const,
+                width: 76,
+                pin_map: BTreeMap::from([("Y".to_string(), net_bus("y", 76))]),
+                params: Some(params),
+                attrs: None,
+            },
+        );
+
+        let module = NirModule { ports, nets, nodes };
+        let nir = build_nir(module);
+        let num_vectors = 130;
+        let mut eval = Evaluator::new(&nir, num_vectors, SimOptions::default()).unwrap();
+        eval.comb_eval().unwrap();
+        let outputs = eval.get_outputs();
+        let unpacked = eval.unpack_outputs_to_biguints(&outputs).unwrap();
+        let values = unpacked.get("y").expect("const output");
+
+        let expected = BigUint::from_str_radix("123456789ABCDEF0123", 16).unwrap();
+        for value in values {
+            assert_eq!(value, &expected);
+        }
+    }
+
+    #[test]
+    fn add_kernel_matches_expected_results() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "a".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: 70,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "b".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: 70,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "y".to_string(),
+            NirPort {
+                dir: PortDirection::Output,
+                bits: 70,
+                attrs: None,
+            },
+        );
+
+        let mut nets = BTreeMap::new();
+        nets.insert(
+            "a".to_string(),
+            NirNet {
+                bits: 70,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "b".to_string(),
+            NirNet {
+                bits: 70,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "y".to_string(),
+            NirNet {
+                bits: 70,
+                attrs: None,
+            },
+        );
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "add0".to_string(),
+            NirNode {
+                uid: "add0".to_string(),
+                op: NodeOp::Add,
+                width: 70,
+                pin_map: BTreeMap::from([
+                    ("A".to_string(), net_bus("a", 70)),
+                    ("B".to_string(), net_bus("b", 70)),
+                    ("Y".to_string(), net_bus("y", 70)),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+
+        let module = NirModule { ports, nets, nodes };
+        let nir = build_nir(module);
+        let num_vectors = 10_000;
+        let mut eval = Evaluator::new(&nir, num_vectors, SimOptions::default()).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(0xDEC0_ADD0);
+        let mut a_values = random_biguints(70, num_vectors, &mut rng);
+        let mut b_values = random_biguints(70, num_vectors, &mut rng);
+
+        let max_value: BigUint = (BigUint::from(1u8) << 70) - BigUint::from(1u8);
+        if !a_values.is_empty() {
+            a_values[0] = max_value.clone();
+            b_values[0] = BigUint::from(1u8);
+        }
+        if num_vectors > 1 {
+            a_values[1] = BigUint::default();
+            b_values[1] = max_value.clone();
+        }
+        if num_vectors > 2 {
+            a_values[2] = (BigUint::from(1u8) << 64) - BigUint::from(1u8);
+            b_values[2] = BigUint::from(1u8);
+        }
+
+        let mut inputs = HashMap::new();
+        inputs.insert("a".to_string(), a_values.clone());
+        inputs.insert("b".to_string(), b_values.clone());
+        let packed = eval.pack_inputs_from_biguints(&inputs).unwrap();
+        eval.set_inputs(&packed).unwrap();
+        eval.comb_eval().unwrap();
+
+        let outputs = eval.get_outputs();
+        let unpacked = eval.unpack_outputs_to_biguints(&outputs).unwrap();
+        let sums = unpacked.get("y").expect("add output");
+        let mask = &max_value;
+
+        for ((a, b), result) in a_values.iter().zip(b_values.iter()).zip(sums.iter()) {
+            let expected = (a + b) & mask;
+            assert_eq!(result, &expected);
+        }
+    }
+
+    #[test]
+    fn sub_kernel_matches_expected_results() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "a".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: 68,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "b".to_string(),
+            NirPort {
+                dir: PortDirection::Input,
+                bits: 68,
+                attrs: None,
+            },
+        );
+        ports.insert(
+            "y".to_string(),
+            NirPort {
+                dir: PortDirection::Output,
+                bits: 68,
+                attrs: None,
+            },
+        );
+
+        let mut nets = BTreeMap::new();
+        nets.insert(
+            "a".to_string(),
+            NirNet {
+                bits: 68,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "b".to_string(),
+            NirNet {
+                bits: 68,
+                attrs: None,
+            },
+        );
+        nets.insert(
+            "y".to_string(),
+            NirNet {
+                bits: 68,
+                attrs: None,
+            },
+        );
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "sub0".to_string(),
+            NirNode {
+                uid: "sub0".to_string(),
+                op: NodeOp::Sub,
+                width: 68,
+                pin_map: BTreeMap::from([
+                    ("A".to_string(), net_bus("a", 68)),
+                    ("B".to_string(), net_bus("b", 68)),
+                    ("Y".to_string(), net_bus("y", 68)),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+
+        let module = NirModule { ports, nets, nodes };
+        let nir = build_nir(module);
+        let num_vectors = 10_000;
+        let mut eval = Evaluator::new(&nir, num_vectors, SimOptions::default()).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(0x5EED_BAAD);
+        let mut a_values = random_biguints(68, num_vectors, &mut rng);
+        let mut b_values = random_biguints(68, num_vectors, &mut rng);
+
+        let modulus = BigUint::from(1u8) << 68;
+        let mask: BigUint = (&modulus) - BigUint::from(1u8);
+
+        if !a_values.is_empty() {
+            a_values[0] = BigUint::default();
+            b_values[0] = BigUint::from(1u8);
+        }
+        if num_vectors > 1 {
+            a_values[1] = mask.clone();
+            b_values[1] = mask.clone();
+        }
+        if num_vectors > 2 {
+            a_values[2] = BigUint::from(1u8);
+            b_values[2] = mask.clone();
+        }
+
+        let mut inputs = HashMap::new();
+        inputs.insert("a".to_string(), a_values.clone());
+        inputs.insert("b".to_string(), b_values.clone());
+        let packed = eval.pack_inputs_from_biguints(&inputs).unwrap();
+        eval.set_inputs(&packed).unwrap();
+        eval.comb_eval().unwrap();
+
+        let outputs = eval.get_outputs();
+        let unpacked = eval.unpack_outputs_to_biguints(&outputs).unwrap();
+        let diffs = unpacked.get("y").expect("sub output");
+
+        for ((a, b), result) in a_values.iter().zip(b_values.iter()).zip(diffs.iter()) {
+            let expected = (a + &modulus - b) & &mask;
+            assert_eq!(result, &expected);
+        }
+    }
+
     fn net_bit_index(name: &str, index: u32) -> BitRef {
         BitRef::Net(BitRefNet {
             net: name.to_string(),
@@ -1892,13 +2401,18 @@ impl<'nir> Evaluator<'nir> {
             }
         }
 
+        let words_per_lane = nets.words_per_lane();
         let comb_kernels = Self::build_comb_kernels(
             module,
             &graph,
             &net_indices,
-            nets.words_per_lane(),
+            &net_indices_by_id,
+            &node_bindings,
+            &const_pool,
+            words_per_lane,
             num_vectors,
         );
+        let carry_scratch = vec![0; words_per_lane];
 
         Ok(Self {
             nir,
@@ -1923,6 +2437,7 @@ impl<'nir> Evaluator<'nir> {
             dff_nodes,
             const_pool,
             comb_kernels,
+            carry_scratch,
         })
     }
 
@@ -2225,16 +2740,45 @@ impl<'nir> Evaluator<'nir> {
 
     fn execute_kernel(&mut self, kernel: &NodeKernel) {
         match kernel {
-            NodeKernel::Const(kernel) => self.run_const(kernel),
+            NodeKernel::Const(kernel) | NodeKernel::Slice(kernel) | NodeKernel::Cat(kernel) => {
+                self.run_transfer(kernel)
+            }
             NodeKernel::Not(kernel) => self.run_not(kernel),
             NodeKernel::And(kernel) => self.run_and(kernel),
             NodeKernel::Mux(kernel) => self.run_mux(kernel),
+            NodeKernel::Add(kernel) => self.run_arith(kernel),
+            NodeKernel::Sub(kernel) => self.run_arith(kernel),
         }
     }
 
-    fn run_const(&mut self, kernel: &ConstKernel) {
-        let slice = self.nets.slice_mut(kernel.output);
-        slice.copy_from_slice(&kernel.words);
+    fn run_transfer(&mut self, kernel: &TransferKernel) {
+        let words_per_lane = self.nets.words_per_lane();
+        if words_per_lane == 0 {
+            return;
+        }
+
+        for segment in &kernel.plan {
+            let len = segment.lanes * words_per_lane;
+            if len == 0 {
+                continue;
+            }
+            let dest_start = segment.dest_offset;
+            match &segment.source {
+                SegmentSource::Net { offset } => {
+                    let src_start = *offset;
+                    unsafe {
+                        let src_ptr = self.nets.storage.as_ptr().add(src_start);
+                        let dest_ptr = self.nets.storage.as_mut_ptr().add(dest_start);
+                        ptr::copy(src_ptr, dest_ptr, len);
+                    }
+                }
+                SegmentSource::Const { words } => {
+                    let dest_end = dest_start + len;
+                    let dest_slice = &mut self.nets.storage[dest_start..dest_end];
+                    dest_slice.copy_from_slice(words);
+                }
+            }
+        }
     }
 
     fn run_not(&mut self, kernel: &UnaryKernel) {
@@ -2304,10 +2848,69 @@ impl<'nir> Evaluator<'nir> {
         }
     }
 
+    fn run_arith(&mut self, kernel: &ArithKernel) {
+        let words_per_lane = self.nets.words_per_lane();
+        if words_per_lane == 0 {
+            return;
+        }
+
+        if self.carry_scratch.len() < words_per_lane {
+            self.carry_scratch.resize(words_per_lane, 0);
+        }
+        self.carry_scratch.fill(0);
+
+        if kernel.initial_carry {
+            for word_idx in 0..words_per_lane {
+                self.carry_scratch[word_idx] =
+                    mask_for_word(word_idx, words_per_lane, self.num_vectors);
+            }
+        }
+
+        for bit in &kernel.bits {
+            for word_idx in 0..words_per_lane {
+                let mask = mask_for_word(word_idx, words_per_lane, self.num_vectors);
+                let a_word = match bit.a {
+                    BitSource::Net { offset } => self.nets.storage[offset + word_idx],
+                    BitSource::Const { value } => {
+                        if value {
+                            mask
+                        } else {
+                            0
+                        }
+                    }
+                };
+                let mut b_word = match bit.b {
+                    BitSource::Net { offset } => self.nets.storage[offset + word_idx],
+                    BitSource::Const { value } => {
+                        if value {
+                            mask
+                        } else {
+                            0
+                        }
+                    }
+                };
+
+                if kernel.invert_b {
+                    b_word = (!b_word) & mask;
+                }
+
+                let carry_in = self.carry_scratch[word_idx];
+                let sum = (a_word ^ b_word) ^ carry_in;
+                let carry_out = (a_word & b_word) | (a_word & carry_in) | (b_word & carry_in);
+
+                self.nets.storage[bit.dest_offset + word_idx] = sum & mask;
+                self.carry_scratch[word_idx] = carry_out & mask;
+            }
+        }
+    }
+
     fn build_comb_kernels(
         module: &'nir Module,
         graph: &ModuleGraph,
         net_indices: &HashMap<String, PackedIndex>,
+        net_indices_by_id: &HashMap<NetId, PackedIndex>,
+        node_bindings: &HashMap<NodeId, NodePinBindings>,
+        const_pool: &ConstPool,
         words_per_lane: usize,
         num_vectors: usize,
     ) -> HashMap<NodeId, NodeKernel> {
@@ -2323,10 +2926,69 @@ impl<'nir> Evaluator<'nir> {
                 .expect("module node must exist in graph");
 
             let kernel = match node.op {
-                NodeOp::Const => {
-                    Self::build_const_kernel(node, net_indices, words_per_lane, num_vectors)
-                        .map(NodeKernel::Const)
-                }
+                NodeOp::Const => node_bindings
+                    .get(&node_id)
+                    .and_then(|bindings| {
+                        Self::build_const_kernel(
+                            node,
+                            bindings,
+                            net_indices_by_id,
+                            const_pool,
+                            words_per_lane,
+                            num_vectors,
+                        )
+                    })
+                    .map(NodeKernel::Const),
+                NodeOp::Slice => node_bindings
+                    .get(&node_id)
+                    .and_then(|bindings| {
+                        Self::build_copy_kernel(
+                            bindings,
+                            net_indices_by_id,
+                            const_pool,
+                            words_per_lane,
+                            num_vectors,
+                        )
+                    })
+                    .map(NodeKernel::Slice),
+                NodeOp::Cat => node_bindings
+                    .get(&node_id)
+                    .and_then(|bindings| {
+                        Self::build_copy_kernel(
+                            bindings,
+                            net_indices_by_id,
+                            const_pool,
+                            words_per_lane,
+                            num_vectors,
+                        )
+                    })
+                    .map(NodeKernel::Cat),
+                NodeOp::Add => node_bindings
+                    .get(&node_id)
+                    .and_then(|bindings| {
+                        Self::build_arith_kernel(
+                            bindings,
+                            net_indices_by_id,
+                            const_pool,
+                            words_per_lane,
+                            false,
+                            false,
+                        )
+                    })
+                    .map(NodeKernel::Add),
+                NodeOp::Sub => node_bindings
+                    .get(&node_id)
+                    .and_then(|bindings| {
+                        Self::build_arith_kernel(
+                            bindings,
+                            net_indices_by_id,
+                            const_pool,
+                            words_per_lane,
+                            true,
+                            true,
+                        )
+                    })
+                    .map(NodeKernel::Sub),
                 NodeOp::Not => Self::build_not_kernel(node, net_indices).map(NodeKernel::Not),
                 NodeOp::And => Self::build_and_kernel(node, net_indices).map(NodeKernel::And),
                 NodeOp::Mux => {
@@ -2346,49 +3008,368 @@ impl<'nir> Evaluator<'nir> {
 
     fn build_const_kernel(
         node: &v2m_formats::nir::Node,
-        net_indices: &HashMap<String, PackedIndex>,
+        bindings: &NodePinBindings,
+        net_indices_by_id: &HashMap<NetId, PackedIndex>,
+        const_pool: &ConstPool,
         words_per_lane: usize,
         num_vectors: usize,
-    ) -> Option<ConstKernel> {
-        if node.width != 1 {
-            return None;
-        }
-
-        let output_ref = node.pin_map.get("Y").expect("CONST node must bind Y pin");
-        let output_net = bitref_full_net(output_ref, node.width)?;
-        let output_index = *net_indices
-            .get(output_net)
-            .expect("CONST node output net must be allocated");
-
+    ) -> Option<TransferKernel> {
         let literal = node
             .params
             .as_ref()
             .and_then(|params| params.get("value"))
-            .and_then(|value| value.as_str())
-            .expect("CONST node requires string `value` parameter");
-        let bit_value =
-            parse_const_bool(literal).expect("CONST node value must fit within one bit");
+            .and_then(|value| value.as_str())?;
+        let bits = Self::parse_const_bits(literal, node.width)?;
 
-        let mut words = Vec::with_capacity(output_index.lanes() * words_per_lane);
+        let output_binding = bindings.pins.get("Y")?;
+        let destinations = Self::expand_binding_destinations(output_binding)?;
+        if destinations.len() != bits.len() {
+            return None;
+        }
+
+        let sources: Vec<PackedSourceKind> =
+            bits.into_iter().map(PackedSourceKind::Literal).collect();
+
+        let plan = Self::build_transfer_plan(
+            &sources,
+            &destinations,
+            net_indices_by_id,
+            const_pool,
+            words_per_lane,
+            num_vectors,
+        )?;
+
+        Some(TransferKernel { plan })
+    }
+
+    fn build_copy_kernel(
+        bindings: &NodePinBindings,
+        net_indices_by_id: &HashMap<NetId, PackedIndex>,
+        const_pool: &ConstPool,
+        words_per_lane: usize,
+        num_vectors: usize,
+    ) -> Option<TransferKernel> {
+        let input_binding = bindings.pins.get("A")?;
+        let output_binding = bindings.pins.get("Y")?;
+
+        let sources = Self::expand_binding_sources(input_binding);
+        let destinations = Self::expand_binding_destinations(output_binding)?;
+
+        if sources.len() != destinations.len() {
+            return None;
+        }
+
+        let plan = Self::build_transfer_plan(
+            &sources,
+            &destinations,
+            net_indices_by_id,
+            const_pool,
+            words_per_lane,
+            num_vectors,
+        )?;
+
+        Some(TransferKernel { plan })
+    }
+
+    fn build_arith_kernel(
+        bindings: &NodePinBindings,
+        net_indices_by_id: &HashMap<NetId, PackedIndex>,
+        const_pool: &ConstPool,
+        words_per_lane: usize,
+        invert_b: bool,
+        initial_carry: bool,
+    ) -> Option<ArithKernel> {
+        let input_a = bindings.pins.get("A")?;
+        let input_b = bindings.pins.get("B")?;
+        let output = bindings.pins.get("Y")?;
+
+        let sources_a = Self::expand_binding_sources(input_a);
+        let sources_b = Self::expand_binding_sources(input_b);
+        let destinations = Self::expand_binding_destinations(output)?;
+
+        if destinations.len() != sources_a.len() || destinations.len() != sources_b.len() {
+            return None;
+        }
+
         if words_per_lane == 0 {
-            return Some(ConstKernel {
-                output: output_index,
-                words,
+            return Some(ArithKernel {
+                bits: Vec::new(),
+                invert_b,
+                initial_carry,
             });
         }
 
-        for _ in 0..output_index.lanes() {
-            for word_index in 0..words_per_lane {
-                let mask = mask_for_word(word_index, words_per_lane, num_vectors);
-                let value = if bit_value { mask } else { 0 };
-                words.push(value);
+        let mut bits = Vec::with_capacity(destinations.len());
+        for idx in 0..destinations.len() {
+            let dest = &destinations[idx];
+            let dest_index = *net_indices_by_id.get(&dest.net)?;
+            let dest_offset = dest_index.offset + dest.lane * words_per_lane;
+            let a_source = Self::convert_bit_source(
+                &sources_a[idx],
+                net_indices_by_id,
+                const_pool,
+                words_per_lane,
+            )?;
+            let b_source = Self::convert_bit_source(
+                &sources_b[idx],
+                net_indices_by_id,
+                const_pool,
+                words_per_lane,
+            )?;
+            bits.push(ArithBit {
+                a: a_source,
+                b: b_source,
+                dest_offset,
+            });
+        }
+
+        Some(ArithKernel {
+            bits,
+            invert_b,
+            initial_carry,
+        })
+    }
+
+    fn expand_binding_sources(binding: &BitBinding) -> Vec<PackedSourceKind> {
+        let mut sources = Vec::new();
+        let bits_per_lane = LANE_BITS as usize;
+        for descriptor in binding.descriptors() {
+            let base_lane =
+                descriptor.lane_offset as usize * bits_per_lane + descriptor.bit_offset as usize;
+            for offset in 0..descriptor.width as usize {
+                let lane = base_lane + offset;
+                match descriptor.source {
+                    SignalId::Net(net_id) => {
+                        sources.push(PackedSourceKind::Net(net_id, lane));
+                    }
+                    SignalId::Const(const_id) => {
+                        sources.push(PackedSourceKind::Const(const_id, lane));
+                    }
+                }
+            }
+        }
+        sources
+    }
+
+    fn expand_binding_destinations(binding: &BitBinding) -> Option<Vec<PackedDestination>> {
+        let mut destinations = Vec::new();
+        let bits_per_lane = LANE_BITS as usize;
+        for descriptor in binding.descriptors() {
+            let base_lane =
+                descriptor.lane_offset as usize * bits_per_lane + descriptor.bit_offset as usize;
+            match descriptor.source {
+                SignalId::Net(net_id) => {
+                    for offset in 0..descriptor.width as usize {
+                        destinations.push(PackedDestination {
+                            net: net_id,
+                            lane: base_lane + offset,
+                        });
+                    }
+                }
+                SignalId::Const(_) => return None,
+            }
+        }
+        Some(destinations)
+    }
+
+    fn const_pool_bit(const_pool: &ConstPool, const_id: ConstId, lane: usize) -> bool {
+        let value = const_pool.get(const_id);
+        if lane as u32 >= value.width {
+            return false;
+        }
+        let word_index = lane / LANE_BITS as usize;
+        let bit_index = lane % LANE_BITS as usize;
+        let chunk = value.words.get(word_index).copied().unwrap_or(0);
+        ((chunk >> bit_index) & 1) != 0
+    }
+
+    fn convert_bit_source(
+        source: &PackedSourceKind,
+        net_indices_by_id: &HashMap<NetId, PackedIndex>,
+        const_pool: &ConstPool,
+        words_per_lane: usize,
+    ) -> Option<BitSource> {
+        match source {
+            PackedSourceKind::Net(net_id, lane) => {
+                let index = *net_indices_by_id.get(net_id)?;
+                Some(BitSource::Net {
+                    offset: index.offset + lane * words_per_lane,
+                })
+            }
+            PackedSourceKind::Const(const_id, lane) => Some(BitSource::Const {
+                value: Self::const_pool_bit(const_pool, *const_id, *lane),
+            }),
+            PackedSourceKind::Literal(bit) => Some(BitSource::Const { value: *bit }),
+        }
+    }
+
+    fn build_transfer_plan(
+        sources: &[PackedSourceKind],
+        destinations: &[PackedDestination],
+        net_indices_by_id: &HashMap<NetId, PackedIndex>,
+        const_pool: &ConstPool,
+        words_per_lane: usize,
+        num_vectors: usize,
+    ) -> Option<Vec<TransferSegment>> {
+        if sources.len() != destinations.len() {
+            return None;
+        }
+
+        if words_per_lane == 0 {
+            return Some(Vec::new());
+        }
+
+        #[derive(Debug)]
+        enum PendingSource {
+            Net { offset: usize },
+            Const { bits: Vec<bool> },
+        }
+
+        struct PendingSegment {
+            dest_offset: usize,
+            source: PendingSource,
+            lanes: usize,
+        }
+
+        fn finalize_pending(
+            pending: Option<PendingSegment>,
+            plan: &mut Vec<TransferSegment>,
+            words_per_lane: usize,
+            num_vectors: usize,
+        ) {
+            if let Some(segment) = pending {
+                match segment.source {
+                    PendingSource::Net { offset } => {
+                        plan.push(TransferSegment {
+                            dest_offset: segment.dest_offset,
+                            lanes: segment.lanes,
+                            source: SegmentSource::Net { offset },
+                        });
+                    }
+                    PendingSource::Const { bits } => {
+                        let mut words = Vec::with_capacity(bits.len() * words_per_lane);
+                        if words_per_lane != 0 {
+                            for bit in bits {
+                                for word_idx in 0..words_per_lane {
+                                    let mask = mask_for_word(word_idx, words_per_lane, num_vectors);
+                                    words.push(if bit { mask } else { 0 });
+                                }
+                            }
+                        }
+                        plan.push(TransferSegment {
+                            dest_offset: segment.dest_offset,
+                            lanes: segment.lanes,
+                            source: SegmentSource::Const { words },
+                        });
+                    }
+                }
             }
         }
 
-        Some(ConstKernel {
-            output: output_index,
-            words,
-        })
+        let mut plan = Vec::new();
+        let mut pending: Option<PendingSegment> = None;
+
+        for (source_kind, dest) in sources.iter().zip(destinations.iter()) {
+            let dest_index = *net_indices_by_id.get(&dest.net)?;
+            let dest_offset = dest_index.offset + dest.lane * words_per_lane;
+            let source = Self::convert_bit_source(
+                source_kind,
+                net_indices_by_id,
+                const_pool,
+                words_per_lane,
+            )?;
+
+            match source {
+                BitSource::Net { offset } => {
+                    if let Some(existing) = pending.as_mut() {
+                        if let PendingSource::Net {
+                            offset: current_offset,
+                        } = &mut existing.source
+                        {
+                            if existing.dest_offset + existing.lanes * words_per_lane == dest_offset
+                                && *current_offset + existing.lanes * words_per_lane == offset
+                            {
+                                existing.lanes += 1;
+                                continue;
+                            }
+                        }
+                    }
+
+                    let to_flush = pending.take();
+                    finalize_pending(to_flush, &mut plan, words_per_lane, num_vectors);
+                    pending = Some(PendingSegment {
+                        dest_offset,
+                        source: PendingSource::Net { offset },
+                        lanes: 1,
+                    });
+                }
+                BitSource::Const { value } => {
+                    if let Some(existing) = pending.as_mut() {
+                        if let PendingSource::Const { bits } = &mut existing.source {
+                            if existing.dest_offset + existing.lanes * words_per_lane == dest_offset
+                            {
+                                bits.push(value);
+                                existing.lanes += 1;
+                                continue;
+                            }
+                        }
+                    }
+
+                    let to_flush = pending.take();
+                    finalize_pending(to_flush, &mut plan, words_per_lane, num_vectors);
+                    pending = Some(PendingSegment {
+                        dest_offset,
+                        source: PendingSource::Const { bits: vec![value] },
+                        lanes: 1,
+                    });
+                }
+            }
+        }
+
+        finalize_pending(pending, &mut plan, words_per_lane, num_vectors);
+        Some(plan)
+    }
+
+    fn parse_const_bits(literal: &str, width: u32) -> Option<Vec<bool>> {
+        let (base, digits) = if let Some(rest) = literal.strip_prefix("0b") {
+            (2u32, rest)
+        } else if let Some(rest) = literal.strip_prefix("0B") {
+            (2u32, rest)
+        } else if let Some(rest) = literal.strip_prefix("0x") {
+            (16u32, rest)
+        } else if let Some(rest) = literal.strip_prefix("0X") {
+            (16u32, rest)
+        } else {
+            (10u32, literal)
+        };
+
+        let digits: String = digits.chars().filter(|c| *c != '_').collect();
+        if digits.is_empty() {
+            return None;
+        }
+
+        let value = match base {
+            2 => BigUint::from_str_radix(&digits, 2).ok()?,
+            16 => BigUint::from_str_radix(&digits, 16).ok()?,
+            10 => BigUint::parse_bytes(digits.as_bytes(), 10)?,
+            _ => unreachable!(),
+        };
+
+        let width = width as usize;
+        if width == 0 {
+            return Some(Vec::new());
+        }
+
+        if value.bits() > width as u64 {
+            return None;
+        }
+
+        let mut bits = Vec::with_capacity(width);
+        for index in 0..width {
+            bits.push(value.bit(index as u64));
+        }
+
+        Some(bits)
     }
 
     fn build_not_kernel(
