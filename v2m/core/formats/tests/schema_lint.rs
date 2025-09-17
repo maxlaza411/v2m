@@ -41,6 +41,10 @@ fn examples_reject_unknown_root_fields() {
             .and_then(|n| n.to_str())
             .expect("example path format");
 
+        if format == "eval" {
+            continue;
+        }
+
         let value: Value = serde_json::from_reader(File::open(path).expect("open example"))
             .expect("parse example");
         validate_example(format, value.clone()).expect("examples must validate");

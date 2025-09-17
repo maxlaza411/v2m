@@ -1,0 +1,14 @@
+{
+  "design": "full_adder",
+  "top": "FullAdder",
+  "vectors": 4,
+  "cycles": [
+    {
+      "index": 0,
+      "outputs": {
+        "cout": ["0x0", "0x0", "0x1", "0x1"],
+        "sum": ["0x0", "0x1", "0x0", "0x1"]
+      }
+    }
+  ]
+}

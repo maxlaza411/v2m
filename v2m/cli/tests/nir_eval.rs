@@ -104,6 +104,54 @@ fn eval_reports_golden_mismatch() {
         .stderr(predicate::str::contains("output mismatch"));
 }
 
+#[test]
+fn eval_profile_flag_prints_metrics() {
+    let design = golden("tests/golden/nir/fa1.nir.json");
+    let inputs = cli_data("tests/data/nir/fa1.inputs.json");
+
+    Command::cargo_bin("v2m")
+        .expect("binary exists")
+        .args([
+            "nir",
+            "eval",
+            "--nir",
+            design.to_str().unwrap(),
+            "--inputs",
+            inputs.to_str().unwrap(),
+            "--profile",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Profile summary:"))
+        .stdout(predicate::str::contains("Kernel breakdown:"));
+}
+
+#[test]
+fn eval_profile_json_is_written() {
+    let design = golden("tests/golden/nir/fa1.nir.json");
+    let inputs = cli_data("tests/data/nir/fa1.inputs.json");
+    let temp = TempDir::new().expect("temp dir");
+    let profile_path = temp.path().join("profile.json");
+
+    Command::cargo_bin("v2m")
+        .expect("binary exists")
+        .args([
+            "nir",
+            "eval",
+            "--nir",
+            design.to_str().unwrap(),
+            "--inputs",
+            inputs.to_str().unwrap(),
+            "--profile-json",
+            profile_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let contents = fs::read_to_string(&profile_path).expect("read profile");
+    assert!(contents.contains("\"kernels\""));
+}
+
 fn write_binary_inputs(path: &Path) -> anyhow::Result<()> {
     let mut inputs = BTreeMap::new();
     inputs.insert("a".to_string(), vec![vec![0], vec![0], vec![1], vec![1]]);

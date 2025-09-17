@@ -131,4 +131,53 @@ Future extensions (event-driven short-circuiting, trace recording, activity stat
 * Packing edge cases: slices spanning lane boundaries, concatenation across nets, carries at 64-bit word edges.
 * Performance target: evaluate a 10k-node, 32-bit ALU over 4096 vectors and achieve at least a 10× speedup versus scalar execution.
 
+## CLI usage
+
+The `v2m` workspace ships with a CLI wrapper that executes the evaluator end-to-end. The `nir eval` subcommand accepts an NIR design and either packed stimuli or randomly generated vectors:
+
+```bash
+cargo run --package v2m-cli --bin v2m -- \
+  nir eval --nir examples/nir/full_adder.json \
+  --inputs examples/eval/full_adder.inputs.json \
+  --vectors 4 --profile
+```
+
+The CLI prints the captured outputs as pretty JSON so the results can be redirected into golden files or compared with other back ends. Stimulus and expectation files accept both JSON and binary encodings through the `json:path` / `bin:path` specifier used elsewhere in the repository.
+
+### Profiling metrics
+
+Pass `--profile` to emit a human-readable summary of evaluator activity and `--profile-json <path>` to export the same metrics for offline analysis. Instrumentation stays dormant until a profile flag is provided so regular regression runs incur no measurable overhead.
+
+The report aggregates three values per kernel type:
+
+* **ops** — number of times the kernel executed,
+* **bytes_moved** — total bytes read or written by the kernel, and
+* **total_time_ns** / **average_time_ns** — accumulated and per-op wall-clock durations in nanoseconds.
+
+The JSON export mirrors the internal `ProfileReport` structure:
+
+```json
+{
+  "total_ops": 6,
+  "total_bytes": 3072,
+  "total_time_ns": 145730,
+  "kernels": [
+    { "kind": "and", "ops": 2, "bytes_moved": 1024, "total_time_ns": 51200, "average_time_ns": 25600 },
+    { "kind": "mux", "ops": 1, "bytes_moved": 2048, "total_time_ns": 94530, "average_time_ns": 94530 }
+  ]
+}
+```
+
+These metrics make it straightforward to spot the hot kernels in a design and to plug evaluator runs into automated regression dashboards.
+
+### Examples and quick start
+
+The [`examples/eval`](../examples/eval/README.md) folder contains a walk-through that exercises the CLI against the bundled `full_adder` design. A new contributor can follow these steps to run their first evaluation:
+
+1. Build the CLI with `cargo run --package v2m-cli --bin v2m -- --version` to confirm the toolchain works.
+2. Execute the command above from the repository root to simulate the full adder over four vectors.
+3. Inspect the generated outputs and the profiling summary, or capture the metrics with `--profile-json` for further analysis.
+
+The example stimuli and expected outputs are intentionally small so the entire flow completes in a few seconds.
+
 This design document is the contract for the forthcoming implementation. The stub crate added alongside this document ensures the API is stable enough for other crates to start integrating with Evaluator v2.
