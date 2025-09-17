@@ -3,7 +3,8 @@ members = [
     "core/formats",
     "core/nir",
     "evaluator",
-    "cli"
+    "cli",
+    "crates/tools-yosys"
 ]
 resolver = "2"
 
