@@ -24,3 +24,4 @@ jsonschema = { version = "0.17", default-features = false, features = ["draft201
 insta = { version = "1", features = ["json"], default-features = false }
 walkdir = "2"
 num-bigint = "0.4"
+sha2 = "0.10"
