@@ -189,15 +189,38 @@ impl StructuralHasher {
 
         match op {
             NodeOp::And => {
-                if inputs
-                    .iter()
-                    .any(|&literal| self.literal_is_zero(literal, width))
-                {
-                    let mut zero = self.constant_zero(width);
-                    if invert_output {
-                        zero = zero.invert();
+                let mut deduped = Vec::with_capacity(inputs.len());
+                let mut previous: Option<Literal> = None;
+
+                for &literal in &inputs {
+                    if self.literal_is_zero(literal, width) {
+                        let mut zero = self.constant_zero(width);
+                        if invert_output {
+                            zero = zero.invert();
+                        }
+                        return zero;
                     }
-                    return zero;
+
+                    if self.literal_is_one(literal, width) {
+                        continue;
+                    }
+
+                    if previous == Some(literal) {
+                        continue;
+                    }
+
+                    previous = Some(literal);
+                    deduped.push(literal);
+                }
+
+                inputs = deduped;
+
+                if inputs.is_empty() {
+                    let mut one = self.constant_one(width);
+                    if invert_output {
+                        one = one.invert();
+                    }
+                    return one;
                 }
 
                 if inputs.len() == 1 {
@@ -240,6 +263,40 @@ impl StructuralHasher {
                 invert_output = parity;
             }
             NodeOp::Or => {
+                let mut deduped = Vec::with_capacity(inputs.len());
+                let mut previous: Option<Literal> = None;
+
+                for &literal in &inputs {
+                    if self.literal_is_one(literal, width) {
+                        let mut one = self.constant_one(width);
+                        if invert_output {
+                            one = one.invert();
+                        }
+                        return one;
+                    }
+
+                    if self.literal_is_zero(literal, width) {
+                        continue;
+                    }
+
+                    if previous == Some(literal) {
+                        continue;
+                    }
+
+                    previous = Some(literal);
+                    deduped.push(literal);
+                }
+
+                inputs = deduped;
+
+                if inputs.is_empty() {
+                    let mut zero = self.constant_zero(width);
+                    if invert_output {
+                        zero = zero.invert();
+                    }
+                    return zero;
+                }
+
                 if inputs.len() == 1 {
                     let mut literal = inputs[0];
                     if invert_output {
@@ -456,6 +513,27 @@ mod tests {
     }
 
     #[test]
+    fn and_with_one_is_identity() {
+        let mut hasher = StructuralHasher::new();
+        let signal = hasher.input(1);
+        let one = hasher.constant_one(1);
+
+        let result = hasher.intern_node(NodeOp::And, [signal, one], 1, None);
+        assert_eq!(result, signal);
+        assert_eq!(hasher.len(), 2);
+    }
+
+    #[test]
+    fn and_all_ones_collapses_to_one() {
+        let mut hasher = StructuralHasher::new();
+        let one = hasher.constant_one(1);
+
+        let result = hasher.intern_node(NodeOp::And, [one, one], 1, None);
+        assert_eq!(result, one);
+        assert_eq!(hasher.len(), 1);
+    }
+
+    #[test]
     fn constant_zero_deduplicates() {
         let mut hasher = StructuralHasher::new();
         let zero_a = hasher.constant_zero(1);
@@ -463,6 +541,28 @@ mod tests {
 
         assert_eq!(zero_a, zero_b);
         assert_eq!(hasher.len(), 1);
+    }
+
+    #[test]
+    fn or_with_zero_is_identity() {
+        let mut hasher = StructuralHasher::new();
+        let signal = hasher.input(1);
+        let zero = hasher.constant_zero(1);
+
+        let result = hasher.intern_node(NodeOp::Or, [signal, zero], 1, None);
+        assert_eq!(result, signal);
+        assert_eq!(hasher.len(), 2);
+    }
+
+    #[test]
+    fn or_with_one_becomes_one() {
+        let mut hasher = StructuralHasher::new();
+        let signal = hasher.input(1);
+        let one = hasher.constant_one(1);
+
+        let result = hasher.intern_node(NodeOp::Or, [signal, one], 1, None);
+        assert_eq!(result, one);
+        assert_eq!(hasher.len(), 2);
     }
 
     #[test]
