@@ -6,7 +6,7 @@ use crate::{
     BuildError, EvalOrderError, Literal, ModuleGraph, NetId, NodeId, ParamMap, StrashKind,
     StructuralHasher,
 };
-use v2m_formats::nir::{Module, Nir, Node, NodeOp, PortDirection};
+use v2m_formats::nir::{BitRefConst, Module, Nir, Node, NodeOp, PortDirection};
 use v2m_formats::{resolve_bitref_net_ids, BitRef, ResolvedBitId};
 
 #[derive(Debug, thiserror::Error)]
@@ -40,6 +40,8 @@ pub enum NormalizeError {
     },
     #[error("node `{node}` output cannot drive a constant value")]
     OutputToConstant { node: String },
+    #[error("node `{node}` is missing param `{param}`")]
+    MissingParam { node: String, param: String },
     #[error("node `{node}` has unsupported operation `{op:?}`")]
     UnsupportedOp { node: String, op: NodeOp },
     #[error("node `{node}` mux select width {width} is not supported")]
@@ -379,18 +381,8 @@ impl<'a> Normalizer<'a> {
                 NodeOp::Add => self.compute_add(node_id, node)?,
                 NodeOp::Sub => self.compute_sub(node_id, node)?,
                 NodeOp::Slice => self.compute_slice(node_id, node)?,
-                NodeOp::Cat => {
-                    return Err(NormalizeError::UnsupportedOp {
-                        node: self.node_error_name(node_id),
-                        op: NodeOp::Cat,
-                    });
-                }
-                NodeOp::Const => {
-                    return Err(NormalizeError::UnsupportedOp {
-                        node: self.node_error_name(node_id),
-                        op: NodeOp::Const,
-                    });
-                }
+                NodeOp::Cat => self.compute_cat(node_id, node)?,
+                NodeOp::Const => self.compute_const(node_id, node)?,
                 NodeOp::Dff | NodeOp::Latch => continue,
             };
 
@@ -632,6 +624,74 @@ impl<'a> Normalizer<'a> {
         Ok(self.pin_literals(node_id, node, "A")?)
     }
 
+    fn compute_cat(
+        &mut self,
+        node_id: NodeId,
+        node: &Node,
+    ) -> Result<Vec<Literal>, NormalizeError> {
+        let mut total_width = 0usize;
+        let mut outputs = Vec::with_capacity(node.width as usize);
+
+        for (pin, bitref) in &node.pin_map {
+            if pin == "Y" {
+                continue;
+            }
+
+            let literals = self.resolve_bitref_literals(node_id, pin, bitref)?;
+            total_width = total_width.saturating_add(literals.len());
+            outputs.extend(literals.into_iter().map(|(_, literal)| literal));
+        }
+
+        if total_width != node.width as usize {
+            return Err(NormalizeError::OutputWidthMismatch {
+                node: self.node_error_name(node_id),
+                expected: node.width as usize,
+                actual: total_width,
+            });
+        }
+
+        Ok(outputs)
+    }
+
+    fn compute_const(
+        &mut self,
+        node_id: NodeId,
+        node: &Node,
+    ) -> Result<Vec<Literal>, NormalizeError> {
+        let literal = self.node_param_str(node_id, node, "value")?;
+        let bitref = BitRef::Const(BitRefConst {
+            value: literal.to_string(),
+            width: node.width,
+        });
+
+        let resolved = resolve_bitref_net_ids(self.module, &bitref, self.graph.net_lookup())
+            .map_err(|source| NormalizeError::PinResolve {
+                node: self.node_error_name(node_id),
+                pin: "value".to_string(),
+                source,
+            })?;
+
+        let bits: Vec<bool> = resolved
+            .into_iter()
+            .map(|bit| match bit {
+                ResolvedBitId::Const(value) => value,
+                ResolvedBitId::Net(_) => unreachable!("constant value resolved to net"),
+            })
+            .collect();
+
+        if bits.len() != node.width as usize {
+            return Err(NormalizeError::OutputWidthMismatch {
+                node: self.node_error_name(node_id),
+                expected: node.width as usize,
+                actual: bits.len(),
+            });
+        }
+
+        let _ = self.hasher.constant_bits(bits.clone());
+
+        Ok(bits.into_iter().map(|bit| self.constant(bit)).collect())
+    }
+
     fn assign_node_outputs(
         &mut self,
         node_id: NodeId,
@@ -757,6 +817,22 @@ impl<'a> Normalizer<'a> {
 
     fn node_error_name(&self, node: NodeId) -> String {
         self.node_name(node).to_string()
+    }
+
+    fn node_param_str<'b>(
+        &self,
+        node_id: NodeId,
+        node: &'b Node,
+        param: &str,
+    ) -> Result<&'b str, NormalizeError> {
+        node.params
+            .as_ref()
+            .and_then(|params| params.get(param))
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| NormalizeError::MissingParam {
+                node: self.node_error_name(node_id),
+                param: param.to_string(),
+            })
     }
 
     fn constant(&mut self, value: bool) -> Literal {
