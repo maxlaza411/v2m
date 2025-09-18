@@ -350,7 +350,7 @@ impl ModuleGraph {
         self.net_lookup.get(name).copied()
     }
 
-    pub fn net_lookup(&self) -> &HashMap<String, NetId> {
+    pub fn net_lookup(&self) -> &FxHashMap<String, NetId> {
         &self.net_lookup
     }
 
