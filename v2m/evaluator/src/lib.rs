@@ -2739,11 +2739,14 @@ impl<'nir> Evaluator<'nir> {
         for level in 0..levels {
             let start = self.topo_level_offsets[level];
             let end = self.topo_level_offsets[level + 1];
-            let level_nodes: Vec<NodeId> = self.topo[start..end].to_vec();
-            for node_id in level_nodes {
-                let kernel = self.comb_kernels.get(&node_id).cloned();
-                if let Some(kernel) = kernel {
-                    self.execute_kernel(&kernel);
+            for idx in start..end {
+                let node_id = self.topo[idx];
+                if let Some(kernel_ptr) = self.comb_kernels.get(&node_id).map(std::ptr::from_ref) {
+                    // SAFETY: `kernel_ptr` points to a kernel stored in `self.comb_kernels`.
+                    // The map is not mutated during combinational evaluation, so the
+                    // reference remains valid for the duration of the call.
+                    let kernel = unsafe { &*kernel_ptr };
+                    self.execute_kernel(kernel);
                 }
             }
         }
