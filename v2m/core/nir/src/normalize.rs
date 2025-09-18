@@ -151,11 +151,11 @@ impl NetState {
     }
 }
 
-struct RegisterInfo {
+struct RegisterInfo<'a> {
     node_id: NodeId,
     q_refs: Vec<(NetId, u32)>,
     q_literals: Vec<Literal>,
-    d_pin: BitRef,
+    d_pin: &'a BitRef,
     d_literals: Vec<Literal>,
 }
 
@@ -173,7 +173,7 @@ struct Normalizer<'a> {
     hasher: StructuralHasher,
     nets: Vec<NetState>,
     inputs: BTreeMap<String, Vec<Literal>>,
-    registers: Vec<RegisterInfo>,
+    registers: Vec<RegisterInfo<'a>>,
 }
 
 impl<'a> Normalizer<'a> {
@@ -321,11 +321,11 @@ impl<'a> Normalizer<'a> {
 
     fn initialize_registers(&mut self) -> Result<(), NormalizeError> {
         for index in 0..self.nodes.len() {
-            if !matches!(self.nodes[index].node.op, NodeOp::Dff | NodeOp::Latch) {
+            let node_id = NodeId(index);
+            if !matches!(self.graph.node(node_id).op(), NodeOp::Dff | NodeOp::Latch) {
                 continue;
             }
 
-            let node_id = NodeId(index);
             let (node_name, q_bitref, d_pin) = {
                 let entry = &self.nodes[index];
                 let q = entry
@@ -335,8 +335,7 @@ impl<'a> Normalizer<'a> {
                     .ok_or_else(|| NormalizeError::MissingPin {
                         node: entry.name.to_string(),
                         pin: "Q".to_string(),
-                    })?
-                    .clone();
+                    })?;
                 let d = entry
                     .node
                     .pin_map
@@ -344,12 +343,11 @@ impl<'a> Normalizer<'a> {
                     .ok_or_else(|| NormalizeError::MissingPin {
                         node: entry.name.to_string(),
                         pin: "D".to_string(),
-                    })?
-                    .clone();
+                    })?;
                 (entry.name.to_string(), q, d)
             };
 
-            let resolved = resolve_bitref(self.module, &q_bitref).map_err(|source| {
+            let resolved = resolve_bitref(self.module, q_bitref).map_err(|source| {
                 NormalizeError::PinResolve {
                     node: node_name.clone(),
                     pin: "Q".to_string(),
@@ -388,14 +386,12 @@ impl<'a> Normalizer<'a> {
     }
 
     fn evaluate_combinational_nodes(&mut self) -> Result<(), NormalizeError> {
-        let order = self.order.clone();
-        for node_id in order {
-            let op = self.nodes[node_id.index()].node.op.clone();
-            if matches!(op, NodeOp::Dff | NodeOp::Latch) {
-                continue;
-            }
+        for index in 0..self.order.len() {
+            let node_id = self.order[index];
+            let op = self.graph.node(node_id).op().clone();
 
             let outputs = match op {
+                NodeOp::Dff | NodeOp::Latch => continue,
                 NodeOp::And => self.compute_bitwise_op(node_id, NodeOp::And)?,
                 NodeOp::Or => self.compute_bitwise_op(node_id, NodeOp::Or)?,
                 NodeOp::Xor => self.compute_bitwise_op(node_id, NodeOp::Xor)?,
@@ -417,7 +413,6 @@ impl<'a> Normalizer<'a> {
                         op: NodeOp::Const,
                     });
                 }
-                NodeOp::Dff | NodeOp::Latch => unreachable!(),
             };
 
             self.assign_node_outputs(node_id, outputs)?;
@@ -429,14 +424,10 @@ impl<'a> Normalizer<'a> {
         for idx in 0..self.registers.len() {
             let (node_id, d_pin, q_len) = {
                 let register = &self.registers[idx];
-                (
-                    register.node_id,
-                    register.d_pin.clone(),
-                    register.q_literals.len(),
-                )
+                (register.node_id, register.d_pin, register.q_literals.len())
             };
 
-            let bits = self.resolve_bitref_literals(node_id, "D", &d_pin)?;
+            let bits = self.resolve_bitref_literals(node_id, "D", d_pin)?;
 
             if bits.len() != q_len {
                 return Err(NormalizeError::StateWidthMismatch {
@@ -650,10 +641,9 @@ impl<'a> Normalizer<'a> {
                     node: node_name.clone(),
                     pin: "Y".to_string(),
                 })?
-                .clone()
         };
         let resolved =
-            resolve_bitref(self.module, &bitref).map_err(|source| NormalizeError::PinResolve {
+            resolve_bitref(self.module, bitref).map_err(|source| NormalizeError::PinResolve {
                 node: node_name.clone(),
                 pin: "Y".to_string(),
                 source,
@@ -701,10 +691,9 @@ impl<'a> Normalizer<'a> {
                     node: entry.name.to_string(),
                     pin: pin.to_string(),
                 })?
-                .clone()
         };
         Ok(self
-            .resolve_bitref_literals(node_id, pin, &bitref)?
+            .resolve_bitref_literals(node_id, pin, bitref)?
             .into_iter()
             .map(|(_, literal)| literal)
             .collect())
