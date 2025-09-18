@@ -382,18 +382,8 @@ impl<'a> Normalizer<'a> {
                 NodeOp::Add => self.compute_add(&node_name, &node_clone)?,
                 NodeOp::Sub => self.compute_sub(&node_name, &node_clone)?,
                 NodeOp::Slice => self.compute_slice(&node_name, &node_clone)?,
-                NodeOp::Cat => {
-                    return Err(NormalizeError::UnsupportedOp {
-                        node: node_name,
-                        op: NodeOp::Cat,
-                    });
-                }
-                NodeOp::Const => {
-                    return Err(NormalizeError::UnsupportedOp {
-                        node: node_name,
-                        op: NodeOp::Const,
-                    });
-                }
+                NodeOp::Cat => self.compute_cat(&node_name, &node_clone)?,
+                NodeOp::Const => self.compute_const(&node_name, &node_clone)?,
                 NodeOp::Dff | NodeOp::Latch => continue,
             };
 
@@ -606,6 +596,84 @@ impl<'a> Normalizer<'a> {
         Ok(result)
     }
 
+    fn compute_cat(&mut self, name: &str, node: &Node) -> Result<Vec<Literal>, NormalizeError> {
+        let mut inputs: Vec<_> = node
+            .pin_map
+            .iter()
+            .filter_map(|(pin_name, bitref)| {
+                if pin_name.as_str() == "Y" {
+                    None
+                } else {
+                    Some((pin_name.clone(), bitref.clone()))
+                }
+            })
+            .collect();
+        inputs.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut pieces = Vec::new();
+        for (pin_name, bitref) in inputs {
+            let resolved = self.resolve_bitref_literals(name, &pin_name, &bitref)?;
+            pieces.extend(resolved.into_iter().map(|(_, literal)| literal));
+        }
+
+        let expected = node.width as usize;
+        if pieces.len() != expected {
+            return Err(NormalizeError::OutputWidthMismatch {
+                node: name.to_string(),
+                expected,
+                actual: pieces.len(),
+            });
+        }
+
+        Ok(pieces)
+    }
+
+    fn compute_const(&mut self, name: &str, node: &Node) -> Result<Vec<Literal>, NormalizeError> {
+        let bitref = node
+            .pin_map
+            .get("Y")
+            .ok_or_else(|| NormalizeError::MissingPin {
+                node: name.to_string(),
+                pin: "Y".to_string(),
+            })?;
+
+        let resolved =
+            resolve_bitref(self.module, bitref).map_err(|source| NormalizeError::PinResolve {
+                node: name.to_string(),
+                pin: "Y".to_string(),
+                source,
+            })?;
+
+        if resolved.is_empty() {
+            return Err(NormalizeError::OutputWithoutNet {
+                node: name.to_string(),
+            });
+        }
+
+        if resolved.len() != node.width as usize {
+            return Err(NormalizeError::OutputWidthMismatch {
+                node: name.to_string(),
+                expected: node.width as usize,
+                actual: resolved.len(),
+            });
+        }
+
+        let mut bits = Vec::with_capacity(resolved.len());
+        for bit in resolved {
+            match bit {
+                ResolvedBit::Const(value) => bits.push(value),
+                ResolvedBit::Net(_) => {
+                    return Err(NormalizeError::UnsupportedOp {
+                        node: name.to_string(),
+                        op: NodeOp::Const,
+                    })
+                }
+            }
+        }
+
+        Ok(bits.into_iter().map(|bit| self.constant(bit)).collect())
+    }
+
     fn compute_slice(&mut self, name: &str, node: &Node) -> Result<Vec<Literal>, NormalizeError> {
         Ok(self.pin_literals(name, node, "A")?)
     }
@@ -649,7 +717,11 @@ impl<'a> Normalizer<'a> {
                 ResolvedBit::Net(net_bit) => {
                     self.set_net_bit(net_bit.net.as_str(), net_bit.bit, literal)?;
                 }
-                ResolvedBit::Const(_) => {
+                ResolvedBit::Const(value) => {
+                    if matches!(node.op, NodeOp::Const) {
+                        debug_assert_eq!(literal, self.constant(value));
+                        continue;
+                    }
                     return Err(NormalizeError::OutputToConstant {
                         node: name.to_string(),
                     });
