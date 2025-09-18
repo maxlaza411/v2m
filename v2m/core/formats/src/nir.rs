@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
+use std::hash::BuildHasher;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -216,10 +217,10 @@ pub fn resolve_bitref(module: &Module, bitref: &BitRef) -> Result<Vec<ResolvedBi
     }
 }
 
-pub fn resolve_bitref_net_ids<Id: Copy>(
+pub fn resolve_bitref_net_ids<Id: Copy, S: BuildHasher>(
     module: &Module,
     bitref: &BitRef,
-    net_lookup: &HashMap<String, Id>,
+    net_lookup: &HashMap<String, Id, S>,
 ) -> Result<Vec<ResolvedBitId<Id>>, Error> {
     match bitref {
         BitRef::Net(net) => resolve_bitref_net_with_ids(module, net, net_lookup),
@@ -270,10 +271,10 @@ fn resolve_bitref_net(module: &Module, net: &BitRefNet) -> Result<Vec<ResolvedBi
     Ok(resolved)
 }
 
-fn resolve_bitref_net_with_ids<Id: Copy>(
+fn resolve_bitref_net_with_ids<Id: Copy, S: BuildHasher>(
     module: &Module,
     net: &BitRefNet,
-    net_lookup: &HashMap<String, Id>,
+    net_lookup: &HashMap<String, Id, S>,
 ) -> Result<Vec<ResolvedBitId<Id>>, Error> {
     let definition = module.nets.get(&net.net).ok_or_else(|| Error::UnknownNet {
         net: net.net.clone(),
