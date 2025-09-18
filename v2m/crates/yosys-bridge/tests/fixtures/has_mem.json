@@ -1,0 +1,31 @@
+{
+  "modules": {
+    "memory_block": {
+      "attributes": {
+        "top": 1
+      },
+      "ports": {
+        "clk": { "direction": "input", "bits": [1] },
+        "data_in": { "direction": "input", "bits": [2, 3, 4, 5] },
+        "data_out": { "direction": "output", "bits": [6, 7, 8, 9] }
+      },
+      "cells": {
+        "mem_inst": {
+          "type": "$mem",
+          "attributes": {},
+          "parameters": {},
+          "connections": {
+            "CLK": [1],
+            "DATA": [2, 3, 4, 5],
+            "OUT": [6, 7, 8, 9]
+          }
+        }
+      },
+      "netnames": {
+        "clk": { "bits": [1], "attributes": {} },
+        "data_in": { "bits": [2, 3, 4, 5], "attributes": {} },
+        "data_out": { "bits": [6, 7, 8, 9], "attributes": {} }
+      }
+    }
+  }
+}
