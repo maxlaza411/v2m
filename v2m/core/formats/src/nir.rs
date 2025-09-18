@@ -6,7 +6,7 @@ use jsonschema::{Draft, JSONSchema};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -193,14 +193,44 @@ pub enum ResolvedBit {
     Const(bool),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolvedBitId<Id> {
+    Net((Id, u32)),
+    Const(bool),
+}
+
 pub fn resolve_bitref(module: &Module, bitref: &BitRef) -> Result<Vec<ResolvedBit>, Error> {
     match bitref {
         BitRef::Net(net) => resolve_bitref_net(module, net),
-        BitRef::Const(constant) => resolve_bitref_const(constant),
+        BitRef::Const(constant) => Ok(resolve_bitref_const_bits(constant)?
+            .into_iter()
+            .map(ResolvedBit::Const)
+            .collect()),
         BitRef::Concat(concat) => {
             let mut resolved = Vec::new();
             for part in &concat.concat {
                 resolved.extend(resolve_bitref(module, part)?);
+            }
+            Ok(resolved)
+        }
+    }
+}
+
+pub fn resolve_bitref_net_ids<Id: Copy>(
+    module: &Module,
+    bitref: &BitRef,
+    net_lookup: &HashMap<String, Id>,
+) -> Result<Vec<ResolvedBitId<Id>>, Error> {
+    match bitref {
+        BitRef::Net(net) => resolve_bitref_net_with_ids(module, net, net_lookup),
+        BitRef::Const(constant) => Ok(resolve_bitref_const_bits(constant)?
+            .into_iter()
+            .map(ResolvedBitId::Const)
+            .collect()),
+        BitRef::Concat(concat) => {
+            let mut resolved = Vec::new();
+            for part in &concat.concat {
+                resolved.extend(resolve_bitref_net_ids(module, part, net_lookup)?);
             }
             Ok(resolved)
         }
@@ -240,7 +270,48 @@ fn resolve_bitref_net(module: &Module, net: &BitRefNet) -> Result<Vec<ResolvedBi
     Ok(resolved)
 }
 
-fn resolve_bitref_const(constant: &BitRefConst) -> Result<Vec<ResolvedBit>, Error> {
+fn resolve_bitref_net_with_ids<Id: Copy>(
+    module: &Module,
+    net: &BitRefNet,
+    net_lookup: &HashMap<String, Id>,
+) -> Result<Vec<ResolvedBitId<Id>>, Error> {
+    let definition = module.nets.get(&net.net).ok_or_else(|| Error::UnknownNet {
+        net: net.net.clone(),
+    })?;
+
+    if net.lsb > net.msb {
+        return Err(Error::InvalidBitRange {
+            net: net.net.clone(),
+            lsb: net.lsb,
+            msb: net.msb,
+        });
+    }
+
+    if net.msb >= definition.bits {
+        return Err(Error::BitRangeOutOfBounds {
+            net: net.net.clone(),
+            lsb: net.lsb,
+            msb: net.msb,
+            width: definition.bits,
+        });
+    }
+
+    let net_id = net_lookup
+        .get(&net.net)
+        .copied()
+        .ok_or_else(|| Error::UnknownNet {
+            net: net.net.clone(),
+        })?;
+
+    let mut resolved = Vec::with_capacity((net.msb - net.lsb + 1) as usize);
+    for bit in net.lsb..=net.msb {
+        resolved.push(ResolvedBitId::Net((net_id, bit)));
+    }
+
+    Ok(resolved)
+}
+
+fn resolve_bitref_const_bits(constant: &BitRefConst) -> Result<Vec<bool>, Error> {
     let width = constant.width as usize;
     let literal = constant.value.as_str();
 
@@ -267,18 +338,18 @@ fn resolve_bitref_const(constant: &BitRefConst) -> Result<Vec<ResolvedBit>, Erro
     }
 
     match base {
-        2 => resolve_binary_constant(&digits, width, literal),
-        16 => resolve_hex_constant(&digits, width, literal),
-        10 => resolve_decimal_constant(&digits, width, literal),
+        2 => resolve_binary_constant_bits(&digits, width, literal),
+        16 => resolve_hex_constant_bits(&digits, width, literal),
+        10 => resolve_decimal_constant_bits(&digits, width, literal),
         _ => unreachable!(),
     }
 }
 
-fn resolve_binary_constant(
+fn resolve_binary_constant_bits(
     digits: &str,
     width: usize,
     literal: &str,
-) -> Result<Vec<ResolvedBit>, Error> {
+) -> Result<Vec<bool>, Error> {
     if digits.len() != width {
         return Err(Error::ConstantWidthMismatch {
             literal: literal.to_string(),
@@ -299,16 +370,16 @@ fn resolve_binary_constant(
                 })
             }
         };
-        resolved.push(ResolvedBit::Const(bit));
+        resolved.push(bit);
     }
     Ok(resolved)
 }
 
-fn resolve_hex_constant(
+fn resolve_hex_constant_bits(
     digits: &str,
     width: usize,
     literal: &str,
-) -> Result<Vec<ResolvedBit>, Error> {
+) -> Result<Vec<bool>, Error> {
     let actual = digits.len() * 4;
     if actual != width {
         return Err(Error::ConstantWidthMismatch {
@@ -326,17 +397,17 @@ fn resolve_hex_constant(
         })?;
 
         for offset in 0..4 {
-            resolved.push(ResolvedBit::Const(((nibble >> offset) & 1) == 1));
+            resolved.push(((nibble >> offset) & 1) == 1);
         }
     }
     Ok(resolved)
 }
 
-fn resolve_decimal_constant(
+fn resolve_decimal_constant_bits(
     digits: &str,
     width: usize,
     literal: &str,
-) -> Result<Vec<ResolvedBit>, Error> {
+) -> Result<Vec<bool>, Error> {
     if !digits.chars().all(|c| c.is_ascii_digit()) {
         return Err(Error::InvalidConstant {
             literal: literal.to_string(),
@@ -361,7 +432,7 @@ fn resolve_decimal_constant(
 
     let mut resolved = Vec::with_capacity(width);
     for ch in binary.chars().rev() {
-        resolved.push(ResolvedBit::Const(ch == '1'));
+        resolved.push(ch == '1');
     }
     Ok(resolved)
 }
@@ -369,7 +440,7 @@ fn resolve_decimal_constant(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     fn module_with_nets(nets: &[(&str, u32)]) -> Module {
         let nets_map = nets
@@ -417,6 +488,46 @@ mod tests {
                     bit: 4,
                 }),
             ]
+        );
+    }
+
+    #[test]
+    fn resolves_net_ids_with_lookup() {
+        let module = module_with_nets(&[("data", 4)]);
+        let bitref = BitRef::Net(BitRefNet {
+            net: "data".to_string(),
+            lsb: 1,
+            msb: 2,
+        });
+
+        let mut lookup = HashMap::new();
+        lookup.insert("data".to_string(), 7usize);
+
+        let resolved =
+            resolve_bitref_net_ids(&module, &bitref, &lookup).expect("net ids should resolve");
+        assert_eq!(
+            resolved,
+            vec![
+                ResolvedBitId::Net((7usize, 1)),
+                ResolvedBitId::Net((7usize, 2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolves_constants_with_lookup() {
+        let module = module_with_nets(&[]);
+        let bitref = BitRef::Const(BitRefConst {
+            value: "0b10".to_string(),
+            width: 2,
+        });
+
+        let lookup = HashMap::<String, usize>::new();
+        let resolved =
+            resolve_bitref_net_ids(&module, &bitref, &lookup).expect("constants should resolve");
+        assert_eq!(
+            resolved,
+            vec![ResolvedBitId::Const(false), ResolvedBitId::Const(true)]
         );
     }
 

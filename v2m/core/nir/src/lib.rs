@@ -20,7 +20,7 @@ pub use strash::{Literal, ParamMap, StrashKind, StrashNode, StrashNodeId, Struct
 pub use verilog::{nir_to_verilog, VerilogExportError};
 
 use v2m_formats::nir::{Module, NodeOp};
-use v2m_formats::{resolve_bitref, BitRef, ResolvedBit};
+use v2m_formats::{resolve_bitref_net_ids, BitRef, ResolvedBitId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NetId(usize);
@@ -50,12 +50,6 @@ pub enum BuildError {
         pin: String,
         #[source]
         source: v2m_formats::Error,
-    },
-    #[error("net `{net}` referenced by pin `{pin}` on node `{node}` not found")]
-    UnknownNet {
-        node: String,
-        pin: String,
-        net: String,
     },
 }
 
@@ -356,6 +350,10 @@ impl ModuleGraph {
         self.net_lookup.get(name).copied()
     }
 
+    pub fn net_lookup(&self) -> &HashMap<String, NetId> {
+        &self.net_lookup
+    }
+
     pub fn node_id(&self, name: &str) -> Option<NodeId> {
         self.node_lookup.get(name).copied()
     }
@@ -576,26 +574,17 @@ fn collect_pin_nets(
     node_name: &str,
     pin_name: &str,
 ) -> Result<Vec<NetId>, BuildError> {
-    let resolved = resolve_bitref(module, bitref).map_err(|source| BuildError::PinResolve {
-        node: node_name.to_string(),
-        pin: pin_name.to_string(),
-        source,
+    let resolved = resolve_bitref_net_ids(module, bitref, net_lookup).map_err(|source| {
+        BuildError::PinResolve {
+            node: node_name.to_string(),
+            pin: pin_name.to_string(),
+            source,
+        }
     })?;
 
     let mut nets = BTreeSet::new();
     for resolved_bit in resolved {
-        if let ResolvedBit::Net(bit) = resolved_bit {
-            let net_name = bit.net;
-            let net_id = match net_lookup.get(net_name.as_str()) {
-                Some(id) => *id,
-                None => {
-                    return Err(BuildError::UnknownNet {
-                        node: node_name.to_string(),
-                        pin: pin_name.to_string(),
-                        net: net_name,
-                    })
-                }
-            };
+        if let ResolvedBitId::Net((net_id, _)) = resolved_bit {
             nets.insert(net_id);
         }
     }
