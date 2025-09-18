@@ -2096,6 +2096,29 @@ mod tests {
     }
 
     #[test]
+    fn reset_mask_length_mismatch_errors() {
+        let nir = build_const_dff_nir("0", "sync", "1");
+        let num_vectors = 130;
+        let mut eval =
+            Evaluator::new(&nir, num_vectors, SimOptions::default()).expect("create evaluator");
+
+        let expected_words = eval.get_registers_q().words_per_lane();
+        assert!(expected_words > 0);
+
+        eval.comb_eval().expect("comb eval");
+
+        let mismatched_mask = PackedBitMask::new(64);
+        let mismatched_words = mismatched_mask.words().len();
+        let result = eval.step_clock(&mismatched_mask);
+
+        assert!(matches!(
+            result,
+            Err(Error::ResetMaskWordsMismatch { expected, actual })
+                if expected == expected_words && actual == mismatched_words
+        ));
+    }
+
+    #[test]
     fn async_reset_overrides_without_comb_eval() {
         let nir = build_const_dff_nir("0", "async", "1");
         let mut eval = Evaluator::new(&nir, 1, SimOptions::default()).expect("create evaluator");
