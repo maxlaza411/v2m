@@ -1,7 +1,10 @@
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeSet, BinaryHeap};
 use std::fmt;
 use std::io::Write;
+
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 mod lint;
 mod normalize;
@@ -147,8 +150,8 @@ impl Node {
 pub struct ModuleGraph {
     nets: Vec<Net>,
     nodes: Vec<Node>,
-    net_lookup: HashMap<String, NetId>,
-    node_lookup: HashMap<String, NodeId>,
+    net_lookup: FxHashMap<String, NetId>,
+    node_lookup: FxHashMap<String, NodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,7 +217,8 @@ impl CombTopoLevels {
 impl ModuleGraph {
     pub fn from_module(module: &Module) -> Result<Self, BuildError> {
         let mut nets = Vec::with_capacity(module.nets.len());
-        let mut net_lookup = HashMap::with_capacity(module.nets.len());
+        let mut net_lookup: FxHashMap<String, NetId> = FxHashMap::default();
+        net_lookup.reserve(module.nets.len());
         for (index, (name, net)) in module.nets.iter().enumerate() {
             let id = NetId(index);
             net_lookup.insert(name.clone(), id);
@@ -227,7 +231,8 @@ impl ModuleGraph {
         }
 
         let mut nodes = Vec::with_capacity(module.nodes.len());
-        let mut node_lookup = HashMap::with_capacity(module.nodes.len());
+        let mut node_lookup: FxHashMap<String, NodeId> = FxHashMap::default();
+        node_lookup.reserve(module.nodes.len());
         for (index, (name, node)) in module.nodes.iter().enumerate() {
             let id = NodeId(index);
             node_lookup.insert(name.clone(), id);
@@ -242,10 +247,10 @@ impl ModuleGraph {
             });
         }
 
-        let mut net_driver_sets = vec![BTreeSet::new(); nets.len()];
-        let mut net_load_sets = vec![BTreeSet::new(); nets.len()];
-        let mut node_input_sets = vec![BTreeSet::new(); nodes.len()];
-        let mut node_output_sets = vec![BTreeSet::new(); nodes.len()];
+        let mut net_driver_lists: Vec<SmallVec<[NodeId; 2]>> = vec![SmallVec::new(); nets.len()];
+        let mut net_load_lists: Vec<SmallVec<[NodeId; 4]>> = vec![SmallVec::new(); nets.len()];
+        let mut node_input_lists: Vec<SmallVec<[NetId; 4]>> = vec![SmallVec::new(); nodes.len()];
+        let mut node_output_lists: Vec<SmallVec<[NetId; 2]>> = vec![SmallVec::new(); nodes.len()];
 
         for (node_name, node) in module.nodes.iter() {
             let &node_id = node_lookup
@@ -257,24 +262,24 @@ impl ModuleGraph {
 
                 if is_output_pin(&node.op, pin_name.as_str()) {
                     for net_id in nets_for_pin {
-                        net_driver_sets[net_id.index()].insert(node_id);
-                        node_output_sets[node_id.index()].insert(net_id);
+                        net_driver_lists[net_id.index()].push(node_id);
+                        node_output_lists[node_id.index()].push(net_id);
                     }
                 } else {
                     for net_id in nets_for_pin {
-                        net_load_sets[net_id.index()].insert(node_id);
-                        node_input_sets[node_id.index()].insert(net_id);
+                        net_load_lists[net_id.index()].push(node_id);
+                        node_input_lists[node_id.index()].push(net_id);
                     }
                 }
             }
         }
 
-        let mut fanin_sets = vec![BTreeSet::new(); nodes.len()];
-        let mut fanout_sets = vec![BTreeSet::new(); nodes.len()];
+        let mut fanin_lists: Vec<SmallVec<[NodeId; 4]>> = vec![SmallVec::new(); nodes.len()];
+        let mut fanout_lists: Vec<SmallVec<[NodeId; 4]>> = vec![SmallVec::new(); nodes.len()];
 
         for net_index in 0..nets.len() {
-            let drivers = &net_driver_sets[net_index];
-            let loads = &net_load_sets[net_index];
+            let drivers = &net_driver_lists[net_index];
+            let loads = &net_load_lists[net_index];
             for &driver in drivers {
                 if !nodes[driver.index()].is_combinational() {
                     continue;
@@ -283,22 +288,44 @@ impl ModuleGraph {
                     if !nodes[load.index()].is_combinational() || driver == load {
                         continue;
                     }
-                    fanout_sets[driver.index()].insert(load);
-                    fanin_sets[load.index()].insert(driver);
+                    fanout_lists[driver.index()].push(load);
+                    fanin_lists[load.index()].push(driver);
                 }
             }
         }
 
         for (idx, net) in nets.iter_mut().enumerate() {
-            net.drivers = net_driver_sets[idx].iter().copied().collect();
-            net.loads = net_load_sets[idx].iter().copied().collect();
+            let mut drivers = std::mem::take(&mut net_driver_lists[idx]);
+            drivers.sort_unstable();
+            drivers.dedup();
+            net.drivers = drivers.into_vec();
+
+            let mut loads = std::mem::take(&mut net_load_lists[idx]);
+            loads.sort_unstable();
+            loads.dedup();
+            net.loads = loads.into_vec();
         }
 
         for (idx, node) in nodes.iter_mut().enumerate() {
-            node.inputs = node_input_sets[idx].iter().copied().collect();
-            node.outputs = node_output_sets[idx].iter().copied().collect();
-            node.fanins = fanin_sets[idx].iter().copied().collect();
-            node.fanouts = fanout_sets[idx].iter().copied().collect();
+            let mut inputs = std::mem::take(&mut node_input_lists[idx]);
+            inputs.sort_unstable();
+            inputs.dedup();
+            node.inputs = inputs.into_vec();
+
+            let mut outputs = std::mem::take(&mut node_output_lists[idx]);
+            outputs.sort_unstable();
+            outputs.dedup();
+            node.outputs = outputs.into_vec();
+
+            let mut fanins = std::mem::take(&mut fanin_lists[idx]);
+            fanins.sort_unstable();
+            fanins.dedup();
+            node.fanins = fanins.into_vec();
+
+            let mut fanouts = std::mem::take(&mut fanout_lists[idx]);
+            fanouts.sort_unstable();
+            fanouts.dedup();
+            node.fanouts = fanouts.into_vec();
         }
 
         Ok(Self {
@@ -545,7 +572,7 @@ impl ModuleGraph {
 fn collect_pin_nets(
     module: &Module,
     bitref: &BitRef,
-    net_lookup: &HashMap<String, NetId>,
+    net_lookup: &FxHashMap<String, NetId>,
     node_name: &str,
     pin_name: &str,
 ) -> Result<Vec<NetId>, BuildError> {
@@ -1304,6 +1331,83 @@ mod tests {
         let q = graph.net(graph.net_id("q").unwrap());
         assert_eq!(q.drivers(), &[reg_id]);
         assert_eq!(q.loads(), &[inv_id]);
+    }
+
+    #[test]
+    fn multi_driver_net_preserves_all_edges() {
+        let mut nets = BTreeMap::new();
+        for name in ["a", "b", "shared", "out"] {
+            nets.insert(
+                name.to_string(),
+                NirNet {
+                    bits: 1,
+                    attrs: None,
+                },
+            );
+        }
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "and_out".to_string(),
+            NirNode {
+                uid: "and_out".to_string(),
+                op: NodeOp::And,
+                width: 1,
+                pin_map: BTreeMap::from([
+                    ("A".to_string(), net_bit("shared", 0, 0)),
+                    ("B".to_string(), net_bit("a", 0, 0)),
+                    ("Y".to_string(), net_bit("out", 0, 0)),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+        nodes.insert(
+            "inv_a".to_string(),
+            NirNode {
+                uid: "inv_a".to_string(),
+                op: NodeOp::Not,
+                width: 1,
+                pin_map: BTreeMap::from([
+                    ("A".to_string(), net_bit("a", 0, 0)),
+                    ("Y".to_string(), net_bit("shared", 0, 0)),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+        nodes.insert(
+            "inv_b".to_string(),
+            NirNode {
+                uid: "inv_b".to_string(),
+                op: NodeOp::Not,
+                width: 1,
+                pin_map: BTreeMap::from([
+                    ("A".to_string(), net_bit("b", 0, 0)),
+                    ("Y".to_string(), net_bit("shared", 0, 0)),
+                ]),
+                params: None,
+                attrs: None,
+            },
+        );
+
+        let module = NirModule {
+            ports: BTreeMap::new(),
+            nets,
+            nodes,
+        };
+
+        let graph = ModuleGraph::from_module(&module).expect("build graph");
+        let shared = graph.net(graph.net_id("shared").unwrap());
+        let inv_a = graph.node_id("inv_a").unwrap();
+        let inv_b = graph.node_id("inv_b").unwrap();
+        let and_out = graph.node_id("and_out").unwrap();
+
+        assert_eq!(shared.drivers(), &[inv_a, inv_b]);
+        assert_eq!(shared.loads(), &[and_out]);
+        assert_eq!(graph.node(and_out).fanins(), &[inv_a, inv_b]);
+        assert_eq!(graph.node(inv_a).fanouts(), &[and_out]);
+        assert_eq!(graph.node(inv_b).fanouts(), &[and_out]);
     }
 
     #[test]
