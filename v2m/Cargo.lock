@@ -975,6 +975,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caf4aa5b0f434c91fe5c7f1ecb6a5ece2130b02ad2a590589dda5146df959001"
 
 [[package]]
+name = "rustc-hash"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
+
+[[package]]
 name = "rustix"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1320,8 +1326,10 @@ dependencies = [
  "num-bigint",
  "proptest",
  "rand 0.8.5",
+ "rustc-hash",
  "serde",
  "serde_json",
+ "smallvec",
  "tempfile",
  "thiserror",
  "v2m-evaluator",

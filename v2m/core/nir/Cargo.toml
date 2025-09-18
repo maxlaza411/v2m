@@ -9,6 +9,8 @@ v2m-formats = { path = "../formats" }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
+rustc-hash = "1.1"
+smallvec = "1.11"
 
 [dev-dependencies]
 v2m-formats = { path = "../formats" }
