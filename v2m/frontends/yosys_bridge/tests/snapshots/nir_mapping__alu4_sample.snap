@@ -1,0 +1,243 @@
+---
+source: frontends/yosys_bridge/tests/nir_mapping.rs
+assertion_line: 14
+expression: value
+---
+{
+  "design": "alu4",
+  "modules": {
+    "alu4": {
+      "nets": {
+        "a": {
+          "bits": 4
+        },
+        "and_ab": {
+          "bits": 4
+        },
+        "b": {
+          "bits": 4
+        },
+        "hi_sel": {
+          "bits": 4
+        },
+        "lo_sel": {
+          "bits": 4
+        },
+        "op": {
+          "bits": 2
+        },
+        "or_ab": {
+          "bits": 4
+        },
+        "sum": {
+          "bits": 4
+        },
+        "xor_ab": {
+          "bits": 4
+        },
+        "y": {
+          "bits": 4
+        }
+      },
+      "nodes": {
+        "add_sum": {
+          "attrs": {
+            "A_SIGNED": false,
+            "A_WIDTH": 4,
+            "B_SIGNED": false,
+            "B_WIDTH": 4,
+            "Y_SIGNED": false,
+            "Y_WIDTH": 4
+          },
+          "op": "ADD",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "a"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "b"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "sum"
+            }
+          },
+          "uid": "add_sum",
+          "width": 4
+        },
+        "and_node": {
+          "op": "AND",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "a"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "b"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "and_ab"
+            }
+          },
+          "uid": "and_node",
+          "width": 4
+        },
+        "mux_final": {
+          "op": "MUX",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "lo_sel"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "hi_sel"
+            },
+            "S": {
+              "lsb": 1,
+              "msb": 1,
+              "net": "op"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "y"
+            }
+          },
+          "uid": "mux_final",
+          "width": 4
+        },
+        "mux_hi": {
+          "op": "MUX",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "or_ab"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "xor_ab"
+            },
+            "S": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "op"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "hi_sel"
+            }
+          },
+          "uid": "mux_hi",
+          "width": 4
+        },
+        "mux_lo": {
+          "op": "MUX",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "sum"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "and_ab"
+            },
+            "S": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "op"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "lo_sel"
+            }
+          },
+          "uid": "mux_lo",
+          "width": 4
+        },
+        "or_node": {
+          "op": "OR",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "a"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "b"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "or_ab"
+            }
+          },
+          "uid": "or_node",
+          "width": 4
+        },
+        "xor_node": {
+          "op": "XOR",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "a"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "b"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "xor_ab"
+            }
+          },
+          "uid": "xor_node",
+          "width": 4
+        }
+      },
+      "ports": {
+        "a": {
+          "bits": 4,
+          "dir": "input"
+        },
+        "b": {
+          "bits": 4,
+          "dir": "input"
+        },
+        "op": {
+          "bits": 2,
+          "dir": "input"
+        },
+        "y": {
+          "bits": 4,
+          "dir": "output"
+        }
+      }
+    }
+  },
+  "top": "alu4",
+  "v": "nir-1.1"
+}

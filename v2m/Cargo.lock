@@ -472,6 +472,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "frontends-yosys-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "insta",
+ "serde",
+ "serde_json",
+ "v2m-formats",
+ "yosys-bridge",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

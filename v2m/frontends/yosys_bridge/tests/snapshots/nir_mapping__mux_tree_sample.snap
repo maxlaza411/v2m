@@ -1,0 +1,227 @@
+---
+source: frontends/yosys_bridge/tests/nir_mapping.rs
+assertion_line: 23
+expression: value
+---
+{
+  "design": "mux_tree",
+  "modules": {
+    "mux_tree": {
+      "nets": {
+        "diff": {
+          "bits": 4
+        },
+        "in0": {
+          "bits": 4
+        },
+        "in1": {
+          "bits": 4
+        },
+        "in2": {
+          "bits": 4
+        },
+        "in3": {
+          "bits": 4
+        },
+        "mux_hi": {
+          "bits": 4
+        },
+        "mux_lo": {
+          "bits": 4
+        },
+        "not_in0": {
+          "bits": 4
+        },
+        "sel": {
+          "bits": 2
+        },
+        "xnor_in1_in2": {
+          "bits": 4
+        },
+        "y": {
+          "bits": 4
+        }
+      },
+      "nodes": {
+        "mux_final": {
+          "op": "MUX",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "mux_lo"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "mux_hi"
+            },
+            "S": {
+              "lsb": 1,
+              "msb": 1,
+              "net": "sel"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "y"
+            }
+          },
+          "uid": "mux_final",
+          "width": 4
+        },
+        "mux_level0": {
+          "op": "MUX",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "not_in0"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "xnor_in1_in2"
+            },
+            "S": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "sel"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "mux_lo"
+            }
+          },
+          "uid": "mux_level0",
+          "width": 4
+        },
+        "mux_level1": {
+          "op": "MUX",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "diff"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "in3"
+            },
+            "S": {
+              "lsb": 0,
+              "msb": 0,
+              "net": "sel"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "mux_hi"
+            }
+          },
+          "uid": "mux_level1",
+          "width": 4
+        },
+        "not_in0": {
+          "op": "NOT",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "in0"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "not_in0"
+            }
+          },
+          "uid": "not_in0",
+          "width": 4
+        },
+        "sub_inputs": {
+          "attrs": {
+            "A_SIGNED": false,
+            "A_WIDTH": 4,
+            "B_SIGNED": false,
+            "B_WIDTH": 4,
+            "Y_SIGNED": false,
+            "Y_WIDTH": 4
+          },
+          "op": "SUB",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "in3"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "in2"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "diff"
+            }
+          },
+          "uid": "sub_inputs",
+          "width": 4
+        },
+        "xnor_inputs": {
+          "op": "XNOR",
+          "pin_map": {
+            "A": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "in1"
+            },
+            "B": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "in2"
+            },
+            "Y": {
+              "lsb": 0,
+              "msb": 3,
+              "net": "xnor_in1_in2"
+            }
+          },
+          "uid": "xnor_inputs",
+          "width": 4
+        }
+      },
+      "ports": {
+        "in0": {
+          "bits": 4,
+          "dir": "input"
+        },
+        "in1": {
+          "bits": 4,
+          "dir": "input"
+        },
+        "in2": {
+          "bits": 4,
+          "dir": "input"
+        },
+        "in3": {
+          "bits": 4,
+          "dir": "input"
+        },
+        "sel": {
+          "bits": 2,
+          "dir": "input"
+        },
+        "y": {
+          "bits": 4,
+          "dir": "output"
+        }
+      }
+    }
+  },
+  "top": "mux_tree",
+  "v": "nir-1.1"
+}
