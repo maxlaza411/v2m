@@ -1881,6 +1881,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "yosys-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"

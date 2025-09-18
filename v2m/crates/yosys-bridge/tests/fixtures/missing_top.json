@@ -1,0 +1,12 @@
+{
+  "modules": {
+    "helper": {
+      "attributes": {
+        "src": "helper.v:1"
+      },
+      "ports": {},
+      "cells": {},
+      "netnames": {}
+    }
+  }
+}

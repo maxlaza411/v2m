@@ -1,0 +1,79 @@
+{
+  "modules": {
+    "full_adder": {
+      "attributes": {
+        "top": 1,
+        "src": "full_adder.v:1"
+      },
+      "ports": {
+        "a": { "direction": "input", "bits": [1] },
+        "b": { "direction": "input", "bits": [2] },
+        "cin": { "direction": "input", "bits": [3] },
+        "sum": { "direction": "output", "bits": [4] },
+        "cout": { "direction": "output", "bits": [5] }
+      },
+      "cells": {
+        "xor0": {
+          "type": "$xor",
+          "parameters": {},
+          "attributes": {},
+          "connections": {
+            "A": [1],
+            "B": [2],
+            "Y": [6]
+          }
+        },
+        "xor1": {
+          "type": "$xor",
+          "parameters": {},
+          "attributes": {},
+          "connections": {
+            "A": [6],
+            "B": [3],
+            "Y": [4]
+          }
+        },
+        "and0": {
+          "type": "$and",
+          "parameters": {},
+          "attributes": {},
+          "connections": {
+            "A": [1],
+            "B": [2],
+            "Y": [7]
+          }
+        },
+        "and1": {
+          "type": "$and",
+          "parameters": {},
+          "attributes": {},
+          "connections": {
+            "A": [6],
+            "B": [3],
+            "Y": [8]
+          }
+        },
+        "or0": {
+          "type": "$or",
+          "parameters": {},
+          "attributes": {},
+          "connections": {
+            "A": [7],
+            "B": [8],
+            "Y": [5]
+          }
+        }
+      },
+      "netnames": {
+        "a": { "bits": [1], "attributes": {} },
+        "b": { "bits": [2], "attributes": {} },
+        "cin": { "bits": [3], "attributes": {} },
+        "sum": { "bits": [4], "attributes": {} },
+        "cout": { "bits": [5], "attributes": {} },
+        "$auto$wire$0": { "bits": [6], "attributes": {} },
+        "$auto$wire$1": { "bits": [7], "attributes": {} },
+        "$auto$wire$2": { "bits": [8], "attributes": {} }
+      }
+    }
+  }
+}

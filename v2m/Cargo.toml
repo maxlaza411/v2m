@@ -4,7 +4,8 @@ members = [
     "core/nir",
     "evaluator",
     "cli",
-    "crates/tools-yosys"
+    "crates/tools-yosys",
+    "crates/yosys-bridge"
 ]
 resolver = "2"
 
