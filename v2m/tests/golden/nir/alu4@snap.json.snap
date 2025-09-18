@@ -48,16 +48,16 @@ assertion_line: 25
       "outputs": {
         "y": [
           {
-            "node": 59
+            "node": 58
           },
           {
-            "node": 62
+            "node": 61
           },
           {
-            "node": 65
+            "node": 64
           },
           {
-            "node": 68
+            "node": 67
           }
         ]
       },
@@ -178,13 +178,13 @@ assertion_line: 25
           "id": 13,
           "kind": {
             "kind": "op",
-            "op": "OR",
+            "op": "XOR",
             "inputs": [
               {
-                "node": 10
+                "node": 1
               },
               {
-                "node": 12
+                "node": 5
               }
             ]
           }
@@ -197,10 +197,10 @@ assertion_line: 25
             "op": "XOR",
             "inputs": [
               {
-                "node": 1
+                "node": 12
               },
               {
-                "node": 5
+                "node": 13
               }
             ]
           }
@@ -210,13 +210,13 @@ assertion_line: 25
           "id": 15,
           "kind": {
             "kind": "op",
-            "op": "XOR",
+            "op": "AND",
             "inputs": [
               {
-                "node": 13
+                "node": 1
               },
               {
-                "node": 14
+                "node": 5
               }
             ]
           }
@@ -229,10 +229,10 @@ assertion_line: 25
             "op": "AND",
             "inputs": [
               {
-                "node": 1
+                "node": 12
               },
               {
-                "node": 5
+                "node": 13
               }
             ]
           }
@@ -242,13 +242,13 @@ assertion_line: 25
           "id": 17,
           "kind": {
             "kind": "op",
-            "op": "AND",
+            "op": "OR",
             "inputs": [
               {
-                "node": 13
+                "node": 15
               },
               {
-                "node": 14
+                "node": 16
               }
             ]
           }
@@ -258,13 +258,13 @@ assertion_line: 25
           "id": 18,
           "kind": {
             "kind": "op",
-            "op": "OR",
+            "op": "XOR",
             "inputs": [
               {
-                "node": 16
+                "node": 2
               },
               {
-                "node": 17
+                "node": 6
               }
             ]
           }
@@ -277,10 +277,10 @@ assertion_line: 25
             "op": "XOR",
             "inputs": [
               {
-                "node": 2
+                "node": 17
               },
               {
-                "node": 6
+                "node": 18
               }
             ]
           }
@@ -290,13 +290,13 @@ assertion_line: 25
           "id": 20,
           "kind": {
             "kind": "op",
-            "op": "XOR",
+            "op": "AND",
             "inputs": [
               {
-                "node": 18
+                "node": 2
               },
               {
-                "node": 19
+                "node": 6
               }
             ]
           }
@@ -309,10 +309,10 @@ assertion_line: 25
             "op": "AND",
             "inputs": [
               {
-                "node": 2
+                "node": 17
               },
               {
-                "node": 6
+                "node": 18
               }
             ]
           }
@@ -322,13 +322,13 @@ assertion_line: 25
           "id": 22,
           "kind": {
             "kind": "op",
-            "op": "AND",
+            "op": "OR",
             "inputs": [
               {
-                "node": 18
+                "node": 20
               },
               {
-                "node": 19
+                "node": 21
               }
             ]
           }
@@ -338,13 +338,13 @@ assertion_line: 25
           "id": 23,
           "kind": {
             "kind": "op",
-            "op": "OR",
+            "op": "XOR",
             "inputs": [
               {
-                "node": 21
+                "node": 3
               },
               {
-                "node": 22
+                "node": 7
               }
             ]
           }
@@ -357,10 +357,10 @@ assertion_line: 25
             "op": "XOR",
             "inputs": [
               {
-                "node": 3
+                "node": 22
               },
               {
-                "node": 7
+                "node": 23
               }
             ]
           }
@@ -370,13 +370,13 @@ assertion_line: 25
           "id": 25,
           "kind": {
             "kind": "op",
-            "op": "XOR",
+            "op": "AND",
             "inputs": [
               {
-                "node": 23
+                "node": 3
               },
               {
-                "node": 24
+                "node": 7
               }
             ]
           }
@@ -389,10 +389,10 @@ assertion_line: 25
             "op": "AND",
             "inputs": [
               {
-                "node": 3
+                "node": 22
               },
               {
-                "node": 7
+                "node": 23
               }
             ]
           }
@@ -402,13 +402,13 @@ assertion_line: 25
           "id": 27,
           "kind": {
             "kind": "op",
-            "op": "AND",
+            "op": "OR",
             "inputs": [
               {
-                "node": 23
+                "node": 25
               },
               {
-                "node": 24
+                "node": 26
               }
             ]
           }
@@ -416,22 +416,6 @@ assertion_line: 25
         {
           "width": 1,
           "id": 28,
-          "kind": {
-            "kind": "op",
-            "op": "OR",
-            "inputs": [
-              {
-                "node": 26
-              },
-              {
-                "node": 27
-              }
-            ]
-          }
-        },
-        {
-          "width": 1,
-          "id": 29,
           "kind": {
             "kind": "op",
             "op": "AND",
@@ -448,7 +432,7 @@ assertion_line: 25
         },
         {
           "width": 1,
-          "id": 30,
+          "id": 29,
           "kind": {
             "kind": "op",
             "op": "AND",
@@ -464,16 +448,33 @@ assertion_line: 25
         },
         {
           "width": 1,
-          "id": 31,
+          "id": 30,
           "kind": {
             "kind": "op",
             "op": "OR",
             "inputs": [
               {
-                "node": 29
+                "node": 28
               },
               {
-                "node": 30
+                "node": 29
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 31,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8,
+                "inverted": true
+              },
+              {
+                "node": 14
               }
             ]
           }
@@ -486,8 +487,7 @@ assertion_line: 25
             "op": "AND",
             "inputs": [
               {
-                "node": 8,
-                "inverted": true
+                "node": 8
               },
               {
                 "node": 15
@@ -500,13 +500,13 @@ assertion_line: 25
           "id": 33,
           "kind": {
             "kind": "op",
-            "op": "AND",
+            "op": "OR",
             "inputs": [
               {
-                "node": 8
+                "node": 31
               },
               {
-                "node": 16
+                "node": 32
               }
             ]
           }
@@ -516,13 +516,14 @@ assertion_line: 25
           "id": 34,
           "kind": {
             "kind": "op",
-            "op": "OR",
+            "op": "AND",
             "inputs": [
               {
-                "node": 32
+                "node": 8,
+                "inverted": true
               },
               {
-                "node": 33
+                "node": 19
               }
             ]
           }
@@ -535,8 +536,7 @@ assertion_line: 25
             "op": "AND",
             "inputs": [
               {
-                "node": 8,
-                "inverted": true
+                "node": 8
               },
               {
                 "node": 20
@@ -549,13 +549,13 @@ assertion_line: 25
           "id": 36,
           "kind": {
             "kind": "op",
-            "op": "AND",
+            "op": "OR",
             "inputs": [
               {
-                "node": 8
+                "node": 34
               },
               {
-                "node": 21
+                "node": 35
               }
             ]
           }
@@ -565,13 +565,14 @@ assertion_line: 25
           "id": 37,
           "kind": {
             "kind": "op",
-            "op": "OR",
+            "op": "AND",
             "inputs": [
               {
-                "node": 35
+                "node": 8,
+                "inverted": true
               },
               {
-                "node": 36
+                "node": 24
               }
             ]
           }
@@ -584,8 +585,7 @@ assertion_line: 25
             "op": "AND",
             "inputs": [
               {
-                "node": 8,
-                "inverted": true
+                "node": 8
               },
               {
                 "node": 25
@@ -598,13 +598,13 @@ assertion_line: 25
           "id": 39,
           "kind": {
             "kind": "op",
-            "op": "AND",
+            "op": "OR",
             "inputs": [
               {
-                "node": 8
+                "node": 37
               },
               {
-                "node": 26
+                "node": 38
               }
             ]
           }
@@ -612,22 +612,6 @@ assertion_line: 25
         {
           "width": 1,
           "id": 40,
-          "kind": {
-            "kind": "op",
-            "op": "OR",
-            "inputs": [
-              {
-                "node": 38
-              },
-              {
-                "node": 39
-              }
-            ]
-          }
-        },
-        {
-          "width": 1,
-          "id": 41,
           "kind": {
             "kind": "op",
             "op": "OR",
@@ -643,7 +627,7 @@ assertion_line: 25
         },
         {
           "width": 1,
-          "id": 42,
+          "id": 41,
           "kind": {
             "kind": "op",
             "op": "OR",
@@ -659,7 +643,7 @@ assertion_line: 25
         },
         {
           "width": 1,
-          "id": 43,
+          "id": 42,
           "kind": {
             "kind": "op",
             "op": "OR",
@@ -675,7 +659,7 @@ assertion_line: 25
         },
         {
           "width": 1,
-          "id": 44,
+          "id": 43,
           "kind": {
             "kind": "op",
             "op": "OR",
@@ -691,7 +675,56 @@ assertion_line: 25
         },
         {
           "width": 1,
+          "id": 44,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8,
+                "inverted": true
+              },
+              {
+                "node": 40
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
           "id": 45,
+          "kind": {
+            "kind": "op",
+            "op": "AND",
+            "inputs": [
+              {
+                "node": 8
+              },
+              {
+                "node": 11
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 46,
+          "kind": {
+            "kind": "op",
+            "op": "OR",
+            "inputs": [
+              {
+                "node": 44
+              },
+              {
+                "node": 45
+              }
+            ]
+          }
+        },
+        {
+          "width": 1,
+          "id": 47,
           "kind": {
             "kind": "op",
             "op": "AND",
@@ -708,7 +741,7 @@ assertion_line: 25
         },
         {
           "width": 1,
-          "id": 46,
+          "id": 48,
           "kind": {
             "kind": "op",
             "op": "AND",
@@ -717,30 +750,30 @@ assertion_line: 25
                 "node": 8
               },
               {
-                "node": 11
+                "node": 13
               }
             ]
           }
         },
         {
           "width": 1,
-          "id": 47,
+          "id": 49,
           "kind": {
             "kind": "op",
             "op": "OR",
             "inputs": [
               {
-                "node": 45
+                "node": 47
               },
               {
-                "node": 46
+                "node": 48
               }
             ]
           }
         },
         {
           "width": 1,
-          "id": 48,
+          "id": 50,
           "kind": {
             "kind": "op",
             "op": "AND",
@@ -757,7 +790,7 @@ assertion_line: 25
         },
         {
           "width": 1,
-          "id": 49,
+          "id": 51,
           "kind": {
             "kind": "op",
             "op": "AND",
@@ -766,30 +799,30 @@ assertion_line: 25
                 "node": 8
               },
               {
-                "node": 14
+                "node": 18
               }
             ]
           }
         },
         {
           "width": 1,
-          "id": 50,
+          "id": 52,
           "kind": {
             "kind": "op",
             "op": "OR",
             "inputs": [
               {
-                "node": 48
+                "node": 50
               },
               {
-                "node": 49
+                "node": 51
               }
             ]
           }
         },
         {
           "width": 1,
-          "id": 51,
+          "id": 53,
           "kind": {
             "kind": "op",
             "op": "AND",
@@ -806,7 +839,7 @@ assertion_line: 25
         },
         {
           "width": 1,
-          "id": 52,
+          "id": 54,
           "kind": {
             "kind": "op",
             "op": "AND",
@@ -815,40 +848,7 @@ assertion_line: 25
                 "node": 8
               },
               {
-                "node": 19
-              }
-            ]
-          }
-        },
-        {
-          "width": 1,
-          "id": 53,
-          "kind": {
-            "kind": "op",
-            "op": "OR",
-            "inputs": [
-              {
-                "node": 51
-              },
-              {
-                "node": 52
-              }
-            ]
-          }
-        },
-        {
-          "width": 1,
-          "id": 54,
-          "kind": {
-            "kind": "op",
-            "op": "AND",
-            "inputs": [
-              {
-                "node": 8,
-                "inverted": true
-              },
-              {
-                "node": 44
+                "node": 23
               }
             ]
           }
@@ -858,13 +858,13 @@ assertion_line: 25
           "id": 55,
           "kind": {
             "kind": "op",
-            "op": "AND",
+            "op": "OR",
             "inputs": [
               {
-                "node": 8
+                "node": 53
               },
               {
-                "node": 24
+                "node": 54
               }
             ]
           }
@@ -874,13 +874,14 @@ assertion_line: 25
           "id": 56,
           "kind": {
             "kind": "op",
-            "op": "OR",
+            "op": "AND",
             "inputs": [
               {
-                "node": 54
+                "node": 9,
+                "inverted": true
               },
               {
-                "node": 55
+                "node": 30
               }
             ]
           }
@@ -893,11 +894,10 @@ assertion_line: 25
             "op": "AND",
             "inputs": [
               {
-                "node": 9,
-                "inverted": true
+                "node": 9
               },
               {
-                "node": 31
+                "node": 46
               }
             ]
           }
@@ -907,13 +907,13 @@ assertion_line: 25
           "id": 58,
           "kind": {
             "kind": "op",
-            "op": "AND",
+            "op": "OR",
             "inputs": [
               {
-                "node": 9
+                "node": 56
               },
               {
-                "node": 47
+                "node": 57
               }
             ]
           }
@@ -923,13 +923,14 @@ assertion_line: 25
           "id": 59,
           "kind": {
             "kind": "op",
-            "op": "OR",
+            "op": "AND",
             "inputs": [
               {
-                "node": 57
+                "node": 9,
+                "inverted": true
               },
               {
-                "node": 58
+                "node": 33
               }
             ]
           }
@@ -942,11 +943,10 @@ assertion_line: 25
             "op": "AND",
             "inputs": [
               {
-                "node": 9,
-                "inverted": true
+                "node": 9
               },
               {
-                "node": 34
+                "node": 49
               }
             ]
           }
@@ -956,13 +956,13 @@ assertion_line: 25
           "id": 61,
           "kind": {
             "kind": "op",
-            "op": "AND",
+            "op": "OR",
             "inputs": [
               {
-                "node": 9
+                "node": 59
               },
               {
-                "node": 50
+                "node": 60
               }
             ]
           }
@@ -972,13 +972,14 @@ assertion_line: 25
           "id": 62,
           "kind": {
             "kind": "op",
-            "op": "OR",
+            "op": "AND",
             "inputs": [
               {
-                "node": 60
+                "node": 9,
+                "inverted": true
               },
               {
-                "node": 61
+                "node": 36
               }
             ]
           }
@@ -991,11 +992,10 @@ assertion_line: 25
             "op": "AND",
             "inputs": [
               {
-                "node": 9,
-                "inverted": true
+                "node": 9
               },
               {
-                "node": 37
+                "node": 52
               }
             ]
           }
@@ -1005,13 +1005,13 @@ assertion_line: 25
           "id": 64,
           "kind": {
             "kind": "op",
-            "op": "AND",
+            "op": "OR",
             "inputs": [
               {
-                "node": 9
+                "node": 62
               },
               {
-                "node": 53
+                "node": 63
               }
             ]
           }
@@ -1021,13 +1021,14 @@ assertion_line: 25
           "id": 65,
           "kind": {
             "kind": "op",
-            "op": "OR",
+            "op": "AND",
             "inputs": [
               {
-                "node": 63
+                "node": 9,
+                "inverted": true
               },
               {
-                "node": 64
+                "node": 39
               }
             ]
           }
@@ -1040,11 +1041,10 @@ assertion_line: 25
             "op": "AND",
             "inputs": [
               {
-                "node": 9,
-                "inverted": true
+                "node": 9
               },
               {
-                "node": 40
+                "node": 55
               }
             ]
           }
@@ -1054,29 +1054,13 @@ assertion_line: 25
           "id": 67,
           "kind": {
             "kind": "op",
-            "op": "AND",
-            "inputs": [
-              {
-                "node": 9
-              },
-              {
-                "node": 56
-              }
-            ]
-          }
-        },
-        {
-          "width": 1,
-          "id": 68,
-          "kind": {
-            "kind": "op",
             "op": "OR",
             "inputs": [
               {
-                "node": 66
+                "node": 65
               },
               {
-                "node": 67
+                "node": 66
               }
             ]
           }
