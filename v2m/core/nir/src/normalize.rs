@@ -1,13 +1,13 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use serde::Serialize;
 
 use crate::{
-    BuildError, EvalOrderError, Literal, ModuleGraph, NodeId, ParamMap, StrashKind,
+    BuildError, EvalOrderError, Literal, ModuleGraph, NetId, NodeId, ParamMap, StrashKind,
     StructuralHasher,
 };
 use v2m_formats::nir::{Module, Nir, Node, NodeOp, PortDirection};
-use v2m_formats::{resolve_bitref, BitRef, ResolvedBit, ResolvedNetBit};
+use v2m_formats::{resolve_bitref_net_ids, BitRef, ResolvedBitId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum NormalizeError {
@@ -153,7 +153,7 @@ impl NetState {
 
 struct RegisterInfo {
     name: String,
-    q_refs: Vec<ResolvedNetBit>,
+    q_refs: Vec<(NetId, u32)>,
     q_literals: Vec<Literal>,
     d_pin: BitRef,
     d_literals: Vec<Literal>,
@@ -161,10 +161,11 @@ struct RegisterInfo {
 
 struct Normalizer<'a> {
     module: &'a Module,
+    graph: ModuleGraph,
     nodes: Vec<(&'a String, &'a Node)>,
     order: Vec<NodeId>,
     hasher: StructuralHasher,
-    nets: HashMap<String, NetState>,
+    net_states: Vec<NetState>,
     inputs: BTreeMap<String, Vec<Literal>>,
     registers: Vec<RegisterInfo>,
 }
@@ -174,19 +175,21 @@ impl<'a> Normalizer<'a> {
         let graph = ModuleGraph::from_module(module)?;
         let order = graph.combinational_topological_order()?;
 
-        let mut nets = HashMap::with_capacity(module.nets.len());
-        for (name, net) in &module.nets {
-            nets.insert(name.clone(), NetState::new(net.bits));
-        }
+        let net_states = graph
+            .nets()
+            .iter()
+            .map(|net| NetState::new(net.width()))
+            .collect();
 
         let nodes = module.nodes.iter().collect();
 
         Ok(Self {
             module,
+            graph,
             nodes,
             order,
             hasher: StructuralHasher::new(),
-            nets,
+            net_states,
             inputs: BTreeMap::new(),
             registers: Vec::new(),
         })
@@ -222,10 +225,10 @@ impl<'a> Normalizer<'a> {
             }
 
             let mut bits = Vec::with_capacity(register.q_literals.len());
-            for (index, q_ref) in register.q_refs.iter().enumerate() {
+            for (index, &(net_id, bit_index)) in register.q_refs.iter().enumerate() {
                 bits.push(StateBitSnapshot {
-                    net: q_ref.net.clone(),
-                    bit: q_ref.bit,
+                    net: self.net_name(net_id).to_string(),
+                    bit: bit_index,
                     q: register.q_literals[index].into(),
                     d: register.d_literals[index].into(),
                 });
@@ -284,9 +287,10 @@ impl<'a> Normalizer<'a> {
         for (name, port) in &self.module.ports {
             if matches!(port.dir, PortDirection::Input | PortDirection::Inout) {
                 let mut literals = Vec::with_capacity(port.bits as usize);
+                let net_id = self.net_id(name)?;
                 for bit in 0..port.bits {
                     let literal = self.hasher.input(1);
-                    self.set_net_bit(name, bit, literal)?;
+                    self.set_net_bit(net_id, bit, literal)?;
                     literals.push(literal);
                 }
                 self.inputs.insert(name.clone(), literals);
@@ -322,25 +326,24 @@ impl<'a> Normalizer<'a> {
                 ((*name).clone(), q, d)
             };
 
-            let resolved = resolve_bitref(self.module, &q_bitref).map_err(|source| {
-                NormalizeError::PinResolve {
+            let resolved = resolve_bitref_net_ids(self.module, &q_bitref, self.graph.net_lookup())
+                .map_err(|source| NormalizeError::PinResolve {
                     node: node_name.clone(),
                     pin: "Q".to_string(),
                     source,
-                }
-            })?;
+                })?;
 
             let mut q_refs = Vec::with_capacity(resolved.len());
             let mut q_literals = Vec::with_capacity(resolved.len());
             for bit in resolved {
                 match bit {
-                    ResolvedBit::Net(net_bit) => {
+                    ResolvedBitId::Net((net_id, bit_index)) => {
                         let literal = self.hasher.input(1);
-                        self.set_net_bit(net_bit.net.as_str(), net_bit.bit, literal)?;
-                        q_refs.push(net_bit);
+                        self.set_net_bit(net_id, bit_index, literal)?;
+                        q_refs.push((net_id, bit_index));
                         q_literals.push(literal);
                     }
-                    ResolvedBit::Const(_) => {
+                    ResolvedBitId::Const(_) => {
                         return Err(NormalizeError::OutputToConstant {
                             node: node_name.clone(),
                         });
@@ -433,8 +436,9 @@ impl<'a> Normalizer<'a> {
         for (name, port) in &self.module.ports {
             if matches!(port.dir, PortDirection::Output | PortDirection::Inout) {
                 let mut bits = Vec::with_capacity(port.bits as usize);
+                let net_id = self.net_id(name)?;
                 for bit in 0..port.bits {
-                    bits.push(self.get_net_bit(name, bit)?);
+                    bits.push(self.get_net_bit(net_id, bit)?);
                 }
                 outputs.insert(name.clone(), bits);
             }
@@ -443,12 +447,12 @@ impl<'a> Normalizer<'a> {
     }
 
     fn ensure_all_bits_resolved(&self) -> Result<(), NormalizeError> {
-        for (name, state) in &self.nets {
-            for (index, literal) in state.bits.iter().enumerate() {
+        for (net_index, state) in self.net_states.iter().enumerate() {
+            for (bit_index, literal) in state.bits.iter().enumerate() {
                 if literal.is_none() {
                     return Err(NormalizeError::UnresolvedNetBit {
-                        net: name.clone(),
-                        bit: index as u32,
+                        net: self.net_name(NetId(net_index)).to_string(),
+                        bit: bit_index as u32,
                     });
                 }
             }
@@ -623,8 +627,8 @@ impl<'a> Normalizer<'a> {
                 node: name.to_string(),
                 pin: "Y".to_string(),
             })?;
-        let resolved =
-            resolve_bitref(self.module, bitref).map_err(|source| NormalizeError::PinResolve {
+        let resolved = resolve_bitref_net_ids(self.module, bitref, self.graph.net_lookup())
+            .map_err(|source| NormalizeError::PinResolve {
                 node: name.to_string(),
                 pin: "Y".to_string(),
                 source,
@@ -646,10 +650,10 @@ impl<'a> Normalizer<'a> {
 
         for (bit, literal) in resolved.into_iter().zip(outputs.into_iter()) {
             match bit {
-                ResolvedBit::Net(net_bit) => {
-                    self.set_net_bit(net_bit.net.as_str(), net_bit.bit, literal)?;
+                ResolvedBitId::Net((net_id, bit_index)) => {
+                    self.set_net_bit(net_id, bit_index, literal)?;
                 }
-                ResolvedBit::Const(_) => {
+                ResolvedBitId::Const(_) => {
                     return Err(NormalizeError::OutputToConstant {
                         node: name.to_string(),
                     });
@@ -685,9 +689,9 @@ impl<'a> Normalizer<'a> {
         name: &str,
         pin: &str,
         bitref: &BitRef,
-    ) -> Result<Vec<(Option<ResolvedNetBit>, Literal)>, NormalizeError> {
-        let resolved =
-            resolve_bitref(self.module, bitref).map_err(|source| NormalizeError::PinResolve {
+    ) -> Result<Vec<(Option<(NetId, u32)>, Literal)>, NormalizeError> {
+        let resolved = resolve_bitref_net_ids(self.module, bitref, self.graph.net_lookup())
+            .map_err(|source| NormalizeError::PinResolve {
                 node: name.to_string(),
                 pin: pin.to_string(),
                 source,
@@ -696,13 +700,33 @@ impl<'a> Normalizer<'a> {
         resolved
             .into_iter()
             .map(|bit| match bit {
-                ResolvedBit::Const(value) => Ok((None, self.constant(value))),
-                ResolvedBit::Net(net_bit) => {
-                    let literal = self.get_net_bit(net_bit.net.as_str(), net_bit.bit)?;
-                    Ok((Some(net_bit), literal))
+                ResolvedBitId::Const(value) => Ok((None, self.constant(value))),
+                ResolvedBitId::Net((net_id, bit_index)) => {
+                    let literal = self.get_net_bit(net_id, bit_index)?;
+                    Ok((Some((net_id, bit_index)), literal))
                 }
             })
             .collect()
+    }
+
+    fn net_id(&self, name: &str) -> Result<NetId, NormalizeError> {
+        self.graph
+            .net_id(name)
+            .ok_or_else(|| NormalizeError::UnknownNet {
+                net: name.to_string(),
+            })
+    }
+
+    fn net_name(&self, net: NetId) -> &str {
+        self.graph.net(net).name()
+    }
+
+    fn net_error_name(&self, net: NetId) -> String {
+        self.graph
+            .nets()
+            .get(net.index())
+            .map(|net| net.name().to_string())
+            .unwrap_or_else(|| format!("#{}", net.index()))
     }
 
     fn constant(&mut self, value: bool) -> Literal {
@@ -713,45 +737,50 @@ impl<'a> Normalizer<'a> {
         }
     }
 
-    fn get_net_bit(&self, net: &str, bit: u32) -> Result<Literal, NormalizeError> {
-        let state = self
-            .nets
-            .get(net)
-            .ok_or_else(|| NormalizeError::UnknownNet {
-                net: net.to_string(),
-            })?;
-        state
-            .bits
-            .get(bit as usize)
-            .and_then(|entry| *entry)
-            .ok_or_else(|| NormalizeError::UnresolvedNetBit {
-                net: net.to_string(),
-                bit,
-            })
+    fn get_net_bit(&self, net: NetId, bit: u32) -> Result<Literal, NormalizeError> {
+        match self.net_states.get(net.index()) {
+            Some(state) => state
+                .bits
+                .get(bit as usize)
+                .and_then(|entry| *entry)
+                .ok_or_else(|| NormalizeError::UnresolvedNetBit {
+                    net: self.net_error_name(net),
+                    bit,
+                }),
+            None => Err(NormalizeError::UnknownNet {
+                net: self.net_error_name(net),
+            }),
+        }
     }
 
-    fn set_net_bit(&mut self, net: &str, bit: u32, literal: Literal) -> Result<(), NormalizeError> {
-        let state = self
-            .nets
-            .get_mut(net)
-            .ok_or_else(|| NormalizeError::UnknownNet {
-                net: net.to_string(),
-            })?;
-        let slot =
-            state
-                .bits
-                .get_mut(bit as usize)
-                .ok_or_else(|| NormalizeError::UnresolvedNetBit {
-                    net: net.to_string(),
-                    bit,
-                })?;
-        if slot.is_some() {
-            return Err(NormalizeError::DuplicateNetBit {
-                net: net.to_string(),
+    fn set_net_bit(
+        &mut self,
+        net: NetId,
+        bit: u32,
+        literal: Literal,
+    ) -> Result<(), NormalizeError> {
+        let net_index = net.index();
+        if net_index >= self.net_states.len() {
+            return Err(NormalizeError::UnknownNet {
+                net: self.net_error_name(net),
+            });
+        }
+
+        if bit as usize >= self.net_states[net_index].bits.len() {
+            return Err(NormalizeError::UnresolvedNetBit {
+                net: self.net_error_name(net),
                 bit,
             });
         }
-        *slot = Some(literal);
+
+        if self.net_states[net_index].bits[bit as usize].is_some() {
+            return Err(NormalizeError::DuplicateNetBit {
+                net: self.net_error_name(net),
+                bit,
+            });
+        }
+
+        self.net_states[net_index].bits[bit as usize] = Some(literal);
         Ok(())
     }
 }
