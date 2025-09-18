@@ -363,8 +363,8 @@ impl<'a> Normalizer<'a> {
     }
 
     fn evaluate_combinational_nodes(&mut self) -> Result<(), NormalizeError> {
-        let order = self.order.clone();
-        for node_id in order {
+        let order = std::mem::take(&mut self.order);
+        for &node_id in &order {
             let op = self.graph.node(node_id).op().clone();
             if matches!(op, NodeOp::Dff | NodeOp::Latch) {
                 continue;
@@ -383,11 +383,12 @@ impl<'a> Normalizer<'a> {
                 NodeOp::Slice => self.compute_slice(node_id, node)?,
                 NodeOp::Cat => self.compute_cat(node_id, node)?,
                 NodeOp::Const => self.compute_const(node_id, node)?,
-                NodeOp::Dff | NodeOp::Latch => continue,
+                NodeOp::Dff | NodeOp::Latch => unreachable!("sequential op handled above"),
             };
 
             self.assign_node_outputs(node_id, node, outputs)?;
         }
+        self.order = order;
         Ok(())
     }
 
