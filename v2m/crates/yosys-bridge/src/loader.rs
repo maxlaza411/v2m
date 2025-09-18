@@ -26,6 +26,12 @@ pub struct Module {
 pub struct Cell {
     #[serde(rename = "type")]
     pub kind: String,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub attributes: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub connections: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -5,7 +5,8 @@ members = [
     "evaluator",
     "cli",
     "crates/tools-yosys",
-    "crates/yosys-bridge"
+    "crates/yosys-bridge",
+    "frontends/yosys_bridge"
 ]
 resolver = "2"
 

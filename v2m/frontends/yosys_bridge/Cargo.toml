@@ -1,0 +1,15 @@
+[package]
+name = "frontends-yosys-bridge"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+yosys-bridge = { path = "../../crates/yosys-bridge" }
+v2m-formats = { path = "../../core/formats" }
+
+[dev-dependencies]
+insta = { workspace = true }
