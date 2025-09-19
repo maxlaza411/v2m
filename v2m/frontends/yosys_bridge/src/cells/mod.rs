@@ -10,6 +10,7 @@ use yosys_bridge::loader::Cell;
 pub mod arith;
 pub mod compare;
 pub mod logic;
+pub mod seq;
 
 #[derive(Debug, Default)]
 pub struct LoweredCell {
