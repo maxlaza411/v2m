@@ -4,9 +4,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{Map, Value};
 use v2m_formats::nir::{Module as NirModule, Net as NirNet, Nir, Port as NirPort, PortDirection};
 
-use crate::cells;
+use crate::cells::{self, LoweredCell};
 use crate::context::{BitLookupMap, Ctx, NetBitInfo};
-use crate::nir_node::NirNode;
 
 pub struct ModuleBuilder<'a> {
     module_name: &'a str,
@@ -26,7 +25,7 @@ impl<'a> ModuleBuilder<'a> {
         })
     }
 
-    pub fn build(self) -> Result<NirModule> {
+    pub fn build(mut self) -> Result<NirModule> {
         let ports = build_ports(self.module_name, &self.module.ports)?;
         let nodes = self.build_nodes()?;
         Ok(NirModule {
@@ -36,11 +35,25 @@ impl<'a> ModuleBuilder<'a> {
         })
     }
 
-    fn build_nodes(&self) -> Result<BTreeMap<String, v2m_formats::nir::Node>> {
+    fn build_nodes(&mut self) -> Result<BTreeMap<String, v2m_formats::nir::Node>> {
         let mut nodes = BTreeMap::new();
         for (cell_name, cell) in &self.module.cells {
-            let nir_node = map_cell(self.module_name, cell_name, cell, &self.bit_lookup)?;
-            nodes.insert(cell_name.clone(), nir_node.into_node(cell_name.clone()));
+            let lowered = map_cell(self.module_name, cell_name, cell, &self.bit_lookup)?;
+
+            for (net_name, net) in lowered.extra_nets {
+                if self.nets.contains_key(&net_name) {
+                    bail!(
+                        "internal net `{net_name}` generated while lowering cell `{cell_name}` in module `{}` conflicts with an existing net",
+                        self.module_name
+                    );
+                }
+                self.nets.insert(net_name, net);
+            }
+
+            for (node_name, nir_node) in lowered.nodes {
+                let node = nir_node.into_node(node_name.clone());
+                nodes.insert(node_name, node);
+            }
         }
         Ok(nodes)
     }
@@ -71,17 +84,47 @@ fn map_cell(
     cell_name: &str,
     cell: &yosys_bridge::loader::Cell,
     bit_lookup: &BitLookupMap,
-) -> Result<NirNode> {
+) -> Result<LoweredCell> {
     let mut ctx = Ctx::new(module_name, cell_name, bit_lookup);
     match cell.kind.as_str() {
-        "$and" => cells::logic::map_and(cell, &mut ctx),
-        "$or" => cells::logic::map_or(cell, &mut ctx),
-        "$xor" => cells::logic::map_xor(cell, &mut ctx),
-        "$xnor" => cells::logic::map_xnor(cell, &mut ctx),
-        "$not" => cells::logic::map_not(cell, &mut ctx),
-        "$mux" => cells::logic::map_mux(cell, &mut ctx),
-        "$add" => cells::arith::map_add(cell, &mut ctx),
-        "$sub" => cells::arith::map_sub(cell, &mut ctx),
+        "$and" => Ok(LoweredCell::single(
+            cell_name,
+            cells::logic::map_and(cell, &mut ctx)?,
+        )),
+        "$or" => Ok(LoweredCell::single(
+            cell_name,
+            cells::logic::map_or(cell, &mut ctx)?,
+        )),
+        "$xor" => Ok(LoweredCell::single(
+            cell_name,
+            cells::logic::map_xor(cell, &mut ctx)?,
+        )),
+        "$xnor" => Ok(LoweredCell::single(
+            cell_name,
+            cells::logic::map_xnor(cell, &mut ctx)?,
+        )),
+        "$not" => Ok(LoweredCell::single(
+            cell_name,
+            cells::logic::map_not(cell, &mut ctx)?,
+        )),
+        "$mux" => Ok(LoweredCell::single(
+            cell_name,
+            cells::logic::map_mux(cell, &mut ctx)?,
+        )),
+        "$add" => Ok(LoweredCell::single(
+            cell_name,
+            cells::arith::map_add(cell, &mut ctx)?,
+        )),
+        "$sub" => Ok(LoweredCell::single(
+            cell_name,
+            cells::arith::map_sub(cell, &mut ctx)?,
+        )),
+        "$eq" => cells::compare::map_eq(cell, &mut ctx),
+        "$ne" => cells::compare::map_ne(cell, &mut ctx),
+        "$lt" => cells::compare::map_lt(cell, &mut ctx),
+        "$le" => cells::compare::map_le(cell, &mut ctx),
+        "$gt" => cells::compare::map_gt(cell, &mut ctx),
+        "$ge" => cells::compare::map_ge(cell, &mut ctx),
         other => bail!("unsupported cell `{other}` in module `{module_name}` while mapping to NIR"),
     }
 }

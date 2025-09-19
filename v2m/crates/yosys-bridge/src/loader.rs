@@ -3,9 +3,19 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::BTreeMap, fs, path::Path};
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct LoaderOptions {
     pub allow_mem_blackbox: bool,
+    pub allow_comparator_cells: bool,
+}
+
+impl Default for LoaderOptions {
+    fn default() -> Self {
+        Self {
+            allow_mem_blackbox: false,
+            allow_comparator_cells: true,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -96,6 +106,7 @@ pub fn load_rtlil_json(path: impl AsRef<Path>, options: &LoaderOptions) -> Resul
     let mut modules = BTreeMap::new();
     let mut top_modules = Vec::new();
     let mut memory_cells = Vec::new();
+    let mut comparator_cells = Vec::new();
 
     for (name, raw_module) in modules_map {
         let module = Module::from_raw(&name, raw_module)?;
@@ -107,6 +118,9 @@ pub fn load_rtlil_json(path: impl AsRef<Path>, options: &LoaderOptions) -> Resul
         for (cell_name, cell) in &module.cells {
             if is_memory_cell(&cell.kind) {
                 memory_cells.push(format!("{name}.{cell_name}"));
+            }
+            if is_comparator_cell(&cell.kind) {
+                comparator_cells.push(format!("{name}.{cell_name} ({})", cell.kind));
             }
         }
 
@@ -133,11 +147,22 @@ pub fn load_rtlil_json(path: impl AsRef<Path>, options: &LoaderOptions) -> Resul
         );
     }
 
+    if !options.allow_comparator_cells && !comparator_cells.is_empty() {
+        bail!(
+            "RTLIL JSON still contains comparator cells that must be lowered: {}. Run without --no-expand to enable comparator expansion or ensure Yosys executed `techmap -map +/cmp2.v`.",
+            comparator_cells.join(", ")
+        );
+    }
+
     Ok(RtlilJson { top, modules })
 }
 
 fn is_memory_cell(cell_type: &str) -> bool {
     matches!(cell_type, "$mem" | "$memrd" | "$memwr")
+}
+
+fn is_comparator_cell(cell_type: &str) -> bool {
+    matches!(cell_type, "$eq" | "$ne" | "$lt" | "$le" | "$gt" | "$ge")
 }
 
 fn value_is_truthy(value: &Value) -> bool {
