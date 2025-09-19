@@ -477,8 +477,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "insta",
+ "rand 0.8.5",
  "serde",
  "serde_json",
+ "v2m-evaluator",
  "v2m-formats",
  "yosys-bridge",
 ]

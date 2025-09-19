@@ -53,6 +53,25 @@ fn allow_mem_blackbox_bypasses_memory_check() {
 }
 
 #[test]
+fn detects_remaining_comparator_cells_when_disallowed() {
+    let mut options = LoaderOptions::default();
+    options.allow_comparator_cells = false;
+
+    let error = load_rtlil_json(fixture_path("has_cmp.json"), &options)
+        .expect_err("expect comparator cell error");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("$eq"),
+        "error missing comparator info: {message}"
+    );
+    assert!(
+        message.contains("--no-expand"),
+        "error should hint about --no-expand: {message}"
+    );
+}
+
+#[test]
 fn errors_when_top_module_missing() {
     let error = load_rtlil_json(fixture_path("missing_top.json"), &LoaderOptions::default())
         .expect_err("expect top module error");

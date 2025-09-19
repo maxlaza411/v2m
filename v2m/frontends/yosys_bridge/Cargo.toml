@@ -13,3 +13,5 @@ v2m-formats = { path = "../../core/formats" }
 
 [dev-dependencies]
 insta = { workspace = true }
+rand = { workspace = true }
+v2m-evaluator = { path = "../../evaluator" }

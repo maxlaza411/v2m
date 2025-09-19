@@ -1,11 +1,38 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
 
+use v2m_formats::nir::Net as NirNet;
+
 use crate::context::Ctx;
+use crate::nir_node::NirNode;
 use yosys_bridge::loader::Cell;
 
 pub mod arith;
+pub mod compare;
 pub mod logic;
+
+#[derive(Debug, Default)]
+pub struct LoweredCell {
+    pub nodes: Vec<(String, NirNode)>,
+    pub extra_nets: Vec<(String, NirNet)>,
+}
+
+impl LoweredCell {
+    pub fn single(name: &str, node: NirNode) -> Self {
+        Self {
+            nodes: vec![(name.to_string(), node)],
+            extra_nets: Vec::new(),
+        }
+    }
+
+    pub fn push_node(&mut self, name: String, node: NirNode) {
+        self.nodes.push((name, node));
+    }
+
+    pub fn push_net(&mut self, name: String, net: NirNet) {
+        self.extra_nets.push((name, net));
+    }
+}
 
 fn expect_param_value<'a>(cell: &'a Cell, ctx: &Ctx, name: &str) -> Result<&'a Value> {
     cell.parameters.get(name).ok_or_else(|| {

@@ -1,0 +1,37 @@
+{
+  "modules": {
+    "compare_block": {
+      "attributes": {
+        "top": 1
+      },
+      "ports": {
+        "a": { "direction": "input", "bits": [1, 2] },
+        "b": { "direction": "input", "bits": [3, 4] },
+        "y": { "direction": "output", "bits": [5] }
+      },
+      "cells": {
+        "cmp": {
+          "type": "$eq",
+          "attributes": {},
+          "parameters": {
+            "A_WIDTH": 2,
+            "B_WIDTH": 2,
+            "Y_WIDTH": 1,
+            "A_SIGNED": 0,
+            "B_SIGNED": 0
+          },
+          "connections": {
+            "A": [1, 2],
+            "B": [3, 4],
+            "Y": [5]
+          }
+        }
+      },
+      "netnames": {
+        "a": { "bits": [1, 2], "attributes": {} },
+        "b": { "bits": [3, 4], "attributes": {} },
+        "y": { "bits": [5], "attributes": {} }
+      }
+    }
+  }
+}
